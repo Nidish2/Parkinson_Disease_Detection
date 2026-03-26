@@ -1,0 +1,20 @@
+# Use Python 3.10 for this backend.
+# TensorFlow 2.13 / NumPy 1.24 on Windows do not have a clean Python 3.13 install path.
+Flask==3.0.0
+Flask-Cors==4.0.0
+numpy==1.24.3
+Pillow==10.1.0
+opencv-python==4.8.1.78
+h5py==3.16.0
+joblib==1.5.3
+scikit-learn==1.6.1
+tensorflow==2.13.0
+keras==2.13.1
+pymongo==4.6.1
+dnspython==2.8.0
+python-dotenv==1.0.0
+python-jose==3.3.0
+Werkzeug==3.1.7
+imbalanced-learn==0.12.4
+librosa
+soundfile

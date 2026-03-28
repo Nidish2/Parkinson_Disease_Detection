@@ -174,7 +174,15 @@ const VoiceCaptureModal = ({ onClose }: { onClose: () => void }) => {
       setSaveMessageTone('success');
       setRecordingDuration(0);
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          sampleRate: 44100,
+          channelCount: 1,
+        } 
+      });
       setRecordingStatus('recording');
       mediaRecorderRef.current = new MediaRecorder(stream);
       mediaRecorderRef.current.ondataavailable = (event) => {
@@ -491,7 +499,7 @@ const VoiceCaptureModal = ({ onClose }: { onClose: () => void }) => {
                     </div>
                     <p className="font-bold text-indigo-900 text-xl mb-2">Click to Upload Audio File</p>
                     <p className="text-indigo-600/70 font-medium text-sm">WAV, MP3, M4A, or WEBM support</p>
-                    <input type="file" accept="audio/*" className="hidden" onChange={handleFileUpload} />
+                    <input type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.webm,.flac,.ogg" className="hidden" onChange={handleFileUpload} />
                   </label>
                 </div>
               )}

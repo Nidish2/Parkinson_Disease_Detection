@@ -3,16 +3,10 @@ import glob
 import numpy as np
 import librosa
 import cv2
+import csv
 import tensorflow as tf
 from tensorflow import keras
-
-# Adjust paths based on your structure
-MODEL_PATH = "../public/models/voice_melspec_mobilenetv2.h5"
-
-DATASET_DIRS = [
-    "dataset_audio/ReadText",
-    "dataset_audio/SpontaneousDialogue"
-]
+from sklearn.metrics import classification_report, confusion_matrix
 
 def audio_to_melspec_image(y, sr):
     S = librosa.feature.melspectrogram(
@@ -28,27 +22,36 @@ def audio_to_melspec_image(y, sr):
     return image_rgb
 
 def predict_audio_file(model, file_path):
-    # Load and process exactly like backend_api.py
-    y, sr = librosa.load(file_path, sr=22050, mono=True)
-    y, _ = librosa.effects.trim(y, top_db=20)
-    
+    try:
+        y, sr = librosa.load(file_path, sr=44100, mono=True)
+        y, _ = librosa.effects.trim(y, top_db=20)
+    except Exception as e:
+        print(f"Error loading {file_path}: {e}")
+        return None
+        
     chunk_duration = 5.0
     chunk_samples = int(sr * chunk_duration)
     hop_length_samples = int(sr * 2.5)
     
     chunks = []
-    for start in range(0, len(y) - chunk_samples + 1, hop_length_samples):
-        chunk = y[start:start + chunk_samples]
-        if len(chunk) == chunk_samples:
-            chunks.append(chunk)
+    
+    if len(y) < chunk_samples:
+        pad_length = chunk_samples - len(y)
+        y_padded = np.pad(y, (0, pad_length))
+        chunks.append(y_padded)
+    else:
+        start = 0
+        for start in range(0, len(y) - chunk_samples + 1, hop_length_samples):
+            chunk = y[start:start + chunk_samples]
+            if len(chunk) == chunk_samples:
+                chunks.append(chunk)
+
+        if len(y) > chunk_samples and (len(y) - start - chunk_samples) > int(sr * 1.0):
+            tail_start = len(y) - chunk_samples
+            chunks.append(y[tail_start:])
             
     if len(chunks) == 0:
-        if len(y) > int(sr * 1.0):
-            pad_length = chunk_samples - len(y)
-            y_padded = np.pad(y, (0, pad_length))
-            chunks.append(y_padded)
-        else:
-            return None # Too short
+        return None
             
     images = []
     for chunk in chunks:
@@ -57,62 +60,73 @@ def predict_audio_file(model, file_path):
     X = np.array(images, dtype=np.float32)
     X = keras.applications.mobilenet_v2.preprocess_input(X)
     
-    preds = model.predict(X, verbose=0)
-    avg_prob = float(np.mean(preds))
-    return avg_prob
+    raw_predictions = model.predict(X, verbose=0)
+    
+    # Calculate Ensemble Majority Voting
+    votes = (raw_predictions > 0.5).astype(int).flatten()
+    pd_votes = int(np.sum(votes))
+    total_votes = len(votes)
+    
+    is_pd = pd_votes > (total_votes / 2)
+    return int(is_pd)
 
 def evaluate():
-    print("Loading model from", MODEL_PATH)
-    model = keras.models.load_model(MODEL_PATH)
+    from backend_api import load_voice_cnn
     
+    print("Loading model for evaluation...")
+    model = load_voice_cnn()
+        
+    if not model:
+        print("Failed to load model.")
+        return
+
+    METADATA_CSV = "dataset_metadata.csv"
+    if not os.path.exists(METADATA_CSV):
+        print("Metadata CSV not found! Please run generate_metadata.py first.")
+        return
+
     y_true = []
-    y_pred_probs = []
+    y_pred = []
     
-    for dataset_dir in DATASET_DIRS:
-        print(f"\nScanning directory: {dataset_dir}")
-        for label, idx in [("HC", 0), ("PD", 1)]:
-            folder = os.path.join(dataset_dir, label)
-            if not os.path.exists(folder):
-                continue
-                
-            files = glob.glob(os.path.join(folder, "*.wav"))
-            print(f"  Found {len(files)} {label} files...")
+    print(f"\nScanning {METADATA_CSV} to check file-level accuracy...")
+    
+    count = 0
+    with open(METADATA_CSV, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            file_path = row['file_path']
+            label = int(row['label_idx'])
             
-            for f in files:
-                prob = predict_audio_file(model, f)
-                if prob is not None:
-                    y_true.append(idx)
-                    y_pred_probs.append(prob)
+            predicted_class = predict_audio_file(model, file_path)
+            if predicted_class is not None:
+                y_true.append(label)
+                y_pred.append(predicted_class)
+                
+                count += 1
+                if count % 20 == 0:
+                    print(f"  Processed {count} valid audio files...")
                     
     y_true = np.array(y_true)
-    y_pred_probs = np.array(y_pred_probs)
-    y_pred = (y_pred_probs > 0.5).astype(int)
+    y_pred = np.array(y_pred)
     
-    # Calculate metrics
     accuracy = np.mean(y_true == y_pred)
     
-    tp = np.sum((y_true == 1) & (y_pred == 1))
-    tn = np.sum((y_true == 0) & (y_pred == 0))
-    fp = np.sum((y_true == 0) & (y_pred == 1))
-    fn = np.sum((y_true == 1) & (y_pred == 0))
-    
-    print("\n" + "="*40)
-    print("      EVALUATION RESULTS")
-    print("="*40)
-    print(f"Total Files Tested: {len(y_true)}")
-    print(f"Overall Accuracy:   {accuracy*100:.2f}%")
-    print(f"True Positive (PD correctly classified): {tp}")
-    print(f"True Negative (HC correctly classified): {tn}")
-    print(f"False Positive (HC misclassified as PD): {fp}")
-    print(f"False Negative (PD misclassified as HC): {fn}")
-    
-    if tp + fn > 0:
-        sensitivity = tp / (tp + fn)
-        print(f"Sensitivity (Recall): {sensitivity*100:.2f}%")
-    if tn + fp > 0:
-        specificity = tn / (tn + fp)
-        print(f"Specificity:          {specificity*100:.2f}%")
-    print("="*40)
+    print("\n" + "="*50)
+    print("      FILE-LEVEL EVALUATION RESULTS")
+    print("      (Ensemble Majority Voting)")
+    print("="*50)
+    print(f"Total Audio Files Analyzed: {len(y_true)}")
+    print(f"File-Level Accuracy:        {accuracy*100:.2f}%")
+    print("-" * 50)
+    print("Confusion Matrix:")
+    print(confusion_matrix(y_true, y_pred))
+    print("-" * 50)
+    print("Classification Report:")
+    try:
+        print(classification_report(y_true, y_pred, target_names=['Healthy', 'Parkinsons']))
+    except Exception as e:
+        print(classification_report(y_true, y_pred))
+    print("="*50)
 
 if __name__ == "__main__":
     evaluate()

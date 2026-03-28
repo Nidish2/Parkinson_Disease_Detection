@@ -913,16 +913,37 @@ def predict_voice_audio():
         
         # Save temp file for librosa to load
         import tempfile
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_audio:
-            temp_audio.write(audio_bytes)
-            temp_path = temp_audio.name
+        import subprocess
+        
+        with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as temp_webm:
+            temp_webm.write(audio_bytes)
+            webm_path = temp_webm.name
             
+        wav_path = webm_path.replace('.webm', '.wav')
+        target_audio_path = webm_path
+        
         try:
-            y, sr = librosa.load(temp_path, sr=22050, mono=True)
+            # Try FFmpeg first for perfect conversion
+            try:
+                result = subprocess.run([
+                    'ffmpeg', '-y', '-i', webm_path, 
+                    '-ar', '44100', '-ac', '1', wav_path
+                ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if result.returncode == 0:
+                    target_audio_path = wav_path
+            except FileNotFoundError:
+                # FFmpeg not installed, fallback to direct librosa loading
+                pass
+                
+            y, sr = librosa.load(target_audio_path, sr=44100, mono=True)
             y, _ = librosa.effects.trim(y, top_db=20)
         finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+            if os.path.exists(webm_path):
+                try: os.remove(webm_path)
+                except: pass
+            if os.path.exists(wav_path):
+                try: os.remove(wav_path)
+                except: pass
                 
         # Split into 5s chunks overlapping by 2.5s
         chunk_duration = 5.0
@@ -930,19 +951,26 @@ def predict_voice_audio():
         hop_length_samples = int(sr * 2.5)
         
         chunks = []
-        for start in range(0, len(y) - chunk_samples + 1, hop_length_samples):
-            chunk = y[start:start + chunk_samples]
-            if len(chunk) == chunk_samples:
-                chunks.append(chunk)
+        
+        # Handle recordings exactly as the training script does
+        if len(y) < chunk_samples:
+            pad_length = chunk_samples - len(y)
+            y_padded = np.pad(y, (0, pad_length))
+            chunks.append(y_padded)
+        else:
+            start = 0
+            for start in range(0, len(y) - chunk_samples + 1, hop_length_samples):
+                chunk = y[start:start + chunk_samples]
+                if len(chunk) == chunk_samples:
+                    chunks.append(chunk)
+
+            # Capture the very end if more than 1 second of unique audio is left over
+            if len(y) > chunk_samples and (len(y) - start - chunk_samples) > int(sr * 1.0):
+                tail_start = len(y) - chunk_samples
+                chunks.append(y[tail_start:])
                 
-        # Handle recordings shorter than 5 seconds
         if len(chunks) == 0:
-            if len(y) > int(sr * 1.0): # Min 1 sec
-                pad_length = chunk_samples - len(y)
-                y_padded = np.pad(y, (0, pad_length))
-                chunks.append(y_padded)
-            else:
-                return jsonify({'error': 'Audio is too short for analysis.'}), 400
+            return jsonify({'error': 'Audio is too short for analysis.'}), 400
                 
         # Create spectrograms
         images = []
@@ -954,13 +982,24 @@ def predict_voice_audio():
         
         # Run inference
         raw_predictions = model.predict(X)
+        
+        # Calculate Ensemble Majority Voting
+        votes = (raw_predictions > 0.5).astype(int).flatten()
+        pd_votes = int(np.sum(votes))
+        total_votes = len(votes)
+        
         avg_prob = float(np.mean(raw_predictions))
-        is_pd = avg_prob > 0.5
+        is_pd = pd_votes > (total_votes / 2)
         
         return jsonify({
             'label': 'Parkinsons' if is_pd else 'Healthy',
             'probabilityOfParkinsons': avg_prob,
             'confidence': avg_prob if is_pd else (1 - avg_prob),
+            'chunkVotes': {
+                'total': total_votes,
+                'parkinsons': pd_votes,
+                'healthy': total_votes - pd_votes
+            },
             'predictions': {
                 'Parkinsons': avg_prob,
                 'Healthy': 1 - avg_prob

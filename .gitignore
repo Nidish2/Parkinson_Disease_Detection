@@ -56,3 +56,5 @@ frontend/public/spiral/training/**
 frontend/public/wave/training/**
 frontend/public/spiral/testing/**
 frontend/public/wave/testing/**
+frontend/public/
+dataset_audio/

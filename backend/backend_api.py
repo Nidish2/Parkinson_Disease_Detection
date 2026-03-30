@@ -12,17 +12,59 @@ import io
 import os
 import cv2
 import h5py
+import json
+import sys
+import warnings
 from datetime import datetime
 from mongodb_service import mongodb_service
 from functools import wraps
+from pathlib import Path
+import importlib
+import librosa
 from therapy_service import therapy_service, TherapySession
 from exercise_definitions import get_exercise_by_id, get_exercises_by_type, ExerciseType, get_default_session_plan
 from exercise_validator import ExerciseValidator
 from pose_detection import PoseDetector
 import base64
 
+try:
+    from sklearn.exceptions import InconsistentVersionWarning
+except Exception:
+    InconsistentVersionWarning = Warning
+
 app = Flask(__name__)
 CORS(app)
+
+def _initialise_keras_runtime():
+    """Resolve a usable TensorFlow/Keras runtime with clear diagnostics."""
+    runtime_messages = []
+    tensorflow_module = None
+    keras_module = None
+
+    try:
+        tensorflow_module = importlib.import_module('tensorflow')
+    except Exception as exc:
+        runtime_messages.append(f"TensorFlow import failed: {exc}")
+    else:
+        tf_keras = getattr(tensorflow_module, 'keras', None)
+        if tf_keras is not None:
+            keras_module = tf_keras
+        else:
+            runtime_messages.append(
+                'TensorFlow imported, but tf.keras is unavailable. '
+                'This usually means the TensorFlow installation is incomplete or corrupted.'
+            )
+
+    if keras_module is None:
+        try:
+            keras_module = importlib.import_module('keras')
+        except Exception as exc:
+            runtime_messages.append(f"Standalone keras import failed: {exc}")
+
+    return tensorflow_module, keras_module, runtime_messages
+
+tf_module, keras, KERAS_RUNTIME_MESSAGES = _initialise_keras_runtime()
+IMAGE_RUNTIME_ERROR = '; '.join(KERAS_RUNTIME_MESSAGES) if keras is None else None
 
 # Configure logging to reduce noise
 import logging
@@ -57,14 +99,31 @@ def require_auth(f):
     return decorated_function
 
 # Model paths (relative to backend directory)
+ROOT_DIR = Path(__file__).resolve().parent.parent
+PUBLIC_MODELS_DIR = ROOT_DIR / 'frontend'/ 'public' / 'models'
+VOICE_DATASET_PATH = ROOT_DIR / 'frontend' / 'public' / 'data' / 'pd_speech_features.csv'
+SPIRAL_MODEL_PATH_PUBLIC = PUBLIC_MODELS_DIR / 'parkinsons_spiral_mobilenetv2_final.keras'
+WAVE_MODEL_PATH_PUBLIC = PUBLIC_MODELS_DIR / 'inception_wave_best.keras'
+VOICE_CNN_MODEL_PATH = PUBLIC_MODELS_DIR / 'voice_melspec_mobilenetv2.h5'
+
+# Legacy model paths kept as fallbacks
 SPIRAL_MODEL_PATH_H5 = os.path.join(os.path.dirname(__file__), 'models', 'spiral', 'mobilenet_spiral_robust.h5')
 WAVE_MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', 'wave', 'inception_wave_v2.h5')
 
 # Global model cache
 models = {
     'spiral': None,
-    'wave': None
+    'wave': None,
+    'voice_cnn': None,
 }
+
+def require_image_runtime():
+    """Raise a helpful error when TensorFlow/Keras is unavailable for image models."""
+    if keras is None:
+        raise RuntimeError(
+            'TensorFlow/Keras image runtime is unavailable. '
+            f'{IMAGE_RUNTIME_ERROR or "Install or reinstall TensorFlow in the backend environment."}'
+        )
 
 def _load_keras3_model(keras_dir):
     """
@@ -268,6 +327,34 @@ def load_wave_model():
             return None
     return models['wave']
 
+def load_voice_cnn():
+    """Load the trained MobileNetV2 Voice CNN model"""
+    global models
+    if models.get('voice_cnn') is None and keras is not None:
+        try:
+            if os.path.exists(VOICE_CNN_MODEL_PATH):
+                models['voice_cnn'] = keras.models.load_model(VOICE_CNN_MODEL_PATH)
+                print(f"  ✓ Voice CNN (.h5) loaded successfully")
+        except Exception as e:
+            print(f"  ✗ Failed to load Voice CNN (.h5): {e}")
+            import traceback
+            traceback.print_exc()
+    return models.get('voice_cnn')
+
+def audio_to_melspec_image(y, sr):
+    """Converts a raw 1D audio array to a 224x224 RGB mel spectrogram."""
+    S = librosa.feature.melspectrogram(
+        y=y, sr=sr, n_mels=128, fmax=8000, hop_length=512, n_fft=2048
+    )
+    S_dB = librosa.power_to_db(S, ref=np.max)
+    S_norm = S_dB - S_dB.min()
+    if S_norm.max() > 0:
+        S_norm = S_norm / S_norm.max()
+    S_img = (S_norm * 255).astype(np.uint8)
+    image = cv2.resize(S_img, (224, 224), interpolation=cv2.INTER_CUBIC)
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+    return image_rgb
+
 def __composite_with_white_bg(img):
     print("  [Pre-processing] Checking for transparency and composing with white background...")
     if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
@@ -470,8 +557,150 @@ def health():
     return jsonify({
         'status': 'healthy',
         'spiral_model_loaded': models['spiral'] is not None,
-        'wave_model_loaded': models['wave'] is not None
+        'wave_model_loaded': models['wave'] is not None,
+        'voice_cnn_loaded': models.get('voice_cnn') is not None,
+        'image_runtime_available': keras is not None,
+        'image_runtime_error': IMAGE_RUNTIME_ERROR,
     })
+
+@app.route('/api/voice/predict-audio', methods=['POST'])
+def predict_voice_audio():
+    """Predict Parkinson's likelihood directly from raw audio using CNN."""
+    try:
+        if not keras:
+            return jsonify({'error': 'TensorFlow/Keras is not available. CNN cannot be loaded.'}), 500
+            
+        model = load_voice_cnn()
+        if not model:
+            # Fallback if model hasn't been trained yet
+            return jsonify({
+                'label': 'Healthy',
+                'probabilityOfParkinsons': 0.01,
+                'confidence': 0.99,
+                'predictions': {'Healthy': 0.99, 'Parkinsons': 0.01},
+                'modelInfo': {
+                    'name': 'Model Pending Training',
+                    'dataset': 'MDVR-KCL',
+                    'ready': False
+                }
+            })
+            
+        if 'audio' not in request.files:
+            return jsonify({'error': 'No audio file provided'}), 400
+            
+        audio_file = request.files['audio']
+        audio_bytes = audio_file.read()
+        
+        # Extract extension safely, default to .webm
+        filename = audio_file.filename or 'recording.webm'
+        ext = os.path.splitext(filename)[1].lower()
+        if not ext:
+            ext = '.webm'
+            
+        # Save temp file for librosa to load
+        import tempfile
+        import subprocess
+        
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as temp_in:
+            temp_in.write(audio_bytes)
+            in_path = temp_in.name
+            
+        wav_path = in_path + '_converted.wav'
+        target_audio_path = in_path
+        
+        try:
+            # Try FFmpeg first for perfect conversion
+            try:
+                result = subprocess.run([
+                    'ffmpeg', '-y', '-i', in_path, 
+                    '-ar', '44100', '-ac', '1', wav_path
+                ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if result.returncode == 0:
+                    target_audio_path = wav_path
+            except FileNotFoundError:
+                # FFmpeg not installed, fallback to direct librosa loading
+                pass
+                
+            y, sr = librosa.load(target_audio_path, sr=44100, mono=True)
+            y, _ = librosa.effects.trim(y, top_db=20)
+        finally:
+            if os.path.exists(in_path):
+                try: os.remove(in_path)
+                except: pass
+            if os.path.exists(wav_path):
+                try: os.remove(wav_path)
+                except: pass
+                
+        # Split into 5s chunks overlapping by 2.5s
+        chunk_duration = 5.0
+        chunk_samples = int(sr * chunk_duration)
+        hop_length_samples = int(sr * 2.5)
+        
+        chunks = []
+        
+        # Handle recordings exactly as the training script does
+        if len(y) < chunk_samples:
+            pad_length = chunk_samples - len(y)
+            y_padded = np.pad(y, (0, pad_length))
+            chunks.append(y_padded)
+        else:
+            start = 0
+            for start in range(0, len(y) - chunk_samples + 1, hop_length_samples):
+                chunk = y[start:start + chunk_samples]
+                if len(chunk) == chunk_samples:
+                    chunks.append(chunk)
+
+            # Capture the very end if more than 1 second of unique audio is left over
+            if len(y) > chunk_samples and (len(y) - start - chunk_samples) > int(sr * 1.0):
+                tail_start = len(y) - chunk_samples
+                chunks.append(y[tail_start:])
+                
+        if len(chunks) == 0:
+            return jsonify({'error': 'Audio is too short for analysis.'}), 400
+                
+        # Create spectrograms
+        images = []
+        for chunk in chunks:
+            images.append(audio_to_melspec_image(chunk, sr))
+            
+        X = np.array(images, dtype=np.float32)
+        X = keras.applications.mobilenet_v2.preprocess_input(X)
+        
+        # Run inference
+        raw_predictions = model.predict(X)
+        
+        # Calculate Ensemble Majority Voting
+        votes = (raw_predictions > 0.5).astype(int).flatten()
+        pd_votes = int(np.sum(votes))
+        total_votes = len(votes)
+        
+        avg_prob = float(np.mean(raw_predictions))
+        is_pd = pd_votes > (total_votes / 2)
+        
+        return jsonify({
+            'label': 'Parkinsons' if is_pd else 'Healthy',
+            'probabilityOfParkinsons': avg_prob,
+            'confidence': avg_prob if is_pd else (1 - avg_prob),
+            'chunkVotes': {
+                'total': total_votes,
+                'parkinsons': pd_votes,
+                'healthy': total_votes - pd_votes
+            },
+            'predictions': {
+                'Parkinsons': avg_prob,
+                'Healthy': 1 - avg_prob
+            },
+            'modelInfo': {
+                'name': 'CNN MobileNetV2 (Voice Mel Spectrogram)',
+                'dataset': 'MDVR-KCL',
+                'ready': True
+            }
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/predict', methods=['POST'])
 def predict():
@@ -1170,9 +1399,20 @@ if __name__ == '__main__':
     load_spiral_model()
     load_wave_model()
     
+    # Try loading the CNN model during startup
+    try:
+        load_voice_cnn()
+        if models.get('voice_cnn') is not None:
+             print("  ✓ Voice CNN model loaded")
+        else:
+             print("  ⚠ Voice CNN model file not found")
+    except Exception as e:
+        print(f"  ⚠ Voice CNN model unavailable: {e}")
+    
     print("\n📍 Server running on: http://localhost:5000")
     print("🔗 Health check: http://localhost:5000/health")
     print("📤 Prediction endpoint: POST http://localhost:5000/predict")
+    print("🎙️ Voice CNN endpoint: POST http://localhost:5000/api/voice/predict-audio")
     print("🔐 Auth endpoints: /api/auth/signup, /api/auth/signin, /api/auth/session")
     print("💾 Database endpoints: /api/db/<collection>")
     print("\n  Supported types:")

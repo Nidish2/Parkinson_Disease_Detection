@@ -33,7 +33,7 @@ const createEmptyAnalysis = (): SymptomAnalysis => ({
 const createInitialExerciseUpdate = (): ExerciseUpdate => ({
   exercise: null,
   exerciseIndex: 0,
-  totalExercises: 4,
+  totalExercises: 4, // Default to 4 until session starts
   sessionComplete: false,
   metrics: {
     reps: 0,
@@ -160,6 +160,8 @@ const Therapy = () => {
     // Get advanced analyzer summary
     const advancedSummary = advancedAnalyzerRef.current?.getSummary();
     
+    const totalExercises = engineRef.current?.totalExerciseCount() ?? 4;
+
     // Get progression trend using ProgressionTracker
     const advancedReport: SessionReport = {
       completedAt: new Date().toISOString(),
@@ -169,6 +171,7 @@ const Therapy = () => {
       amplitudeScore: Math.max(0, 100 - currentAnalysis.amplitudeScore),
       overallRisk: currentAnalysis.overallRisk,
       exercisesCompleted: sessionSnapshot.completedExercises,
+      totalExercises,
       totalReps: sessionSnapshot.totalReps,
       durationMinutes: Number(sessionSnapshot.durationMinutes.toFixed(1)),
       averageAccuracy: 0,
@@ -239,13 +242,14 @@ const Therapy = () => {
       amplitudeScore: Math.max(0, 100 - currentAnalysis.amplitudeScore),
       overallRisk: currentAnalysis.overallRisk,
       exercisesCompleted: sessionSnapshot.completedExercises,
+      totalExercises,
       totalReps: sessionSnapshot.totalReps,
       durationMinutes: Number(sessionSnapshot.durationMinutes.toFixed(1)),
       averageAccuracy,
-      rigidityScore: advancedSummary?.avgRigidity ?? 0,
+      rigidityScore: Math.round(advancedSummary?.avgRigidity ?? 0),
       freezingEvents: advancedSummary?.totalFreezes ?? 0,
-      averageFreezingDuration: advancedSummary?.averageFreezeDuration ?? 0,
-      summary: `Based on your seated movement patterns, risk level is ${currentAnalysis.overallRisk}. Your form accuracy was ${averageAccuracy}%, tremor score ${currentAnalysis.tremorScore}, movement speed score ${Math.max(0, 100 - currentAnalysis.bradykinesiaScore)}, and stability score ${Math.max(0, 100 - currentAnalysis.postureScore)}. Advanced metrics show rigidity level ${Math.round(advancedSummary?.avgRigidity ?? 0)} and ${advancedSummary?.totalFreezes ?? 0} freezing events. Use the seated plan below and consider medical consultation if symptoms persist.`,
+      averageFreezingDuration: Number(((advancedSummary?.averageFreezeDuration ?? 0) / 1000).toFixed(1)),
+      summary: `Analysis complete. Your overall risk level is ${currentAnalysis.overallRisk}. We observed a form accuracy of ${averageAccuracy}% across ${sessionSnapshot.completedExercises} exercises. Tremor, speed, and stability scores provide a baseline for your current mobility. Advanced metrics detected ${advancedSummary?.totalFreezes ?? 0} freezing events and a rigidity level of ${Math.round(advancedSummary?.avgRigidity ?? 0)}. Please review the recommendations below and consult with your healthcare provider.`,
       recommendations,
       exercisePlan,
       progressionTrend: advancedReport.progressionTrend,
@@ -288,7 +292,7 @@ const Therapy = () => {
       }
 
       const nextAnalysis = analyzerRef.current?.update(frame ?? null) ?? createEmptyAnalysis();
-      const advancedAnalysis = advancedAnalyzerRef.current?.update(frame ?? null);
+      advancedAnalyzerRef.current?.update(frame ?? null);
       const nextExerciseUpdate = engineRef.current?.update(frame ?? null, nextAnalysis) ?? exerciseUpdateRef.current;
       const agentMessage = agentRef.current?.getMessage({
         ready: true,

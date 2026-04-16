@@ -1,16 +1,8 @@
 import { useState, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, FilePlus, History, Bot, LogOut, Settings, Activity, Layers, Menu, X, Bell, UserCircle, Sun, Moon } from 'lucide-react';
+import { LayoutDashboard, FilePlus, History, Bot, LogOut, Settings, Activity, Layers, Menu, X, Bell, UserCircle, Sun, Moon, Stethoscope, ShieldCheck } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
-
-const navItems = [
-  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/new-test', label: 'New Test', icon: FilePlus },
-  { href: '/comprehensive-screening', label: 'Fusion Score', icon: Layers },
-  { href: '/therapy', label: 'Therapy', icon: Activity },
-  { href: '/history', label: 'History', icon: History },
-  { href: '/chatbot', label: 'AI', icon: Bot },
-];
+import { getDashboardRouteForRole } from '../services/healthcareApi';
 
 interface Notification {
   id: string;
@@ -29,6 +21,26 @@ const Navbar = () => {
   const [showNotifications, setShowNotifications] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [theme, setTheme] = useState<ThemeMode>('light');
+  const dashboardHref = getDashboardRouteForRole(user?.role);
+  const navItems = user?.role === 'doctor'
+    ? [
+        { href: '/doctor-dashboard', label: 'Dashboard', icon: LayoutDashboard },
+        { href: '/chatbot', label: 'AI', icon: Bot },
+      ]
+    : user?.role === 'admin'
+      ? [
+          { href: '/admin-dashboard', label: 'Dashboard', icon: ShieldCheck },
+          { href: '/chatbot', label: 'AI', icon: Bot },
+        ]
+      : [
+          { href: '/patient-dashboard', label: 'Dashboard', icon: LayoutDashboard },
+          { href: '/new-test', label: 'New Test', icon: FilePlus },
+          { href: '/comprehensive-screening', label: 'Fusion Score', icon: Layers },
+          { href: '/therapy', label: 'Therapy', icon: Activity },
+          { href: '/history', label: 'History', icon: History },
+          { href: '/consult', label: 'Consult', icon: Stethoscope },
+          { href: '/chatbot', label: 'AI', icon: Bot },
+        ];
 
   useEffect(() => {
     const storedTheme = localStorage.getItem('theme');
@@ -81,7 +93,7 @@ const Navbar = () => {
         <nav className="w-full max-w-6xl bg-background/70 backdrop-blur-md border border-border/50 shadow-soft rounded-full px-4 py-2 flex items-center justify-between transition-all duration-300">
           
           {/* Logo */}
-          <Link to="/" className="flex items-center gap-3">
+          <Link to={user ? dashboardHref : '/'} className="flex items-center gap-3">
             <div className="h-10 w-10 bg-primary rounded-full flex items-center justify-center shadow-inner-soft">
                <span className="text-white font-serif font-bold text-xl">N</span>
             </div>
@@ -165,7 +177,7 @@ const Navbar = () => {
             <div className="hidden sm:flex items-center gap-3 pl-2 border-l border-border/50">
                <Link to="/profile" className="flex items-center gap-2 text-sm font-semibold text-foreground hover:text-primary transition-colors">
                   <UserCircle size={24} className="text-primary" />
-                  <span className="max-w-[100px] truncate">{profile?.full_name || 'User'}</span>
+                  <span className="max-w-[100px] truncate">{profile?.full_name || user?.full_name || 'User'}</span>
                </Link>
                <button onClick={logout} className="h-10 w-10 rounded-full flex items-center justify-center text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors">
                  <LogOut size={18} />

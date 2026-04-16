@@ -10,6 +10,11 @@ export default defineConfig({
         changeOrigin: true,
         // Don't rewrite - backend already uses /api prefix
       },
+      '/socket.io': {
+        target: 'http://localhost:5000',
+        changeOrigin: true,
+        ws: true,
+      },
     },
   },
   optimizeDeps: {

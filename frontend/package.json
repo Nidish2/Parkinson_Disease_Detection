@@ -13,6 +13,8 @@
   },
   "dependencies": {
     "@faker-js/faker": "^10.1.0",
+    "@mediapipe/drawing_utils": "^0.3.1675466124",
+    "@mediapipe/pose": "^0.5.1675469404",
     "@tensorflow-models/mobilenet": "^2.1.1",
     "@tensorflow/tfjs": "^4.22.0",
     "@tensorflow/tfjs-backend-webgl": "^4.22.0",
@@ -24,7 +26,8 @@
     "lucide-react": "^0.546.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "react-router-dom": "^6.25.1"
+    "react-router-dom": "^6.25.1",
+    "socket.io-client": "^4.8.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.27.0",

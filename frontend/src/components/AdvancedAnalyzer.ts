@@ -41,7 +41,7 @@ export class AdvancedAnalyzer {
 
   // Freezing detection
   private _velocityHistory: VelocitySample[] = [];
-  private freezeThreshold = 0.01;  // pixels/sec (very slow = frozen)
+  private freezeThreshold = 8;  // pixels/sec (very slow = frozen)
   private freezeMinDuration = 300;  // milliseconds before counting as "freeze"
   private freezeStartTime: number | null = null;
   private freezeCount = 0;
@@ -430,12 +430,16 @@ export class AdvancedAnalyzer {
     this.jointAngles = [];
     this.angularVelocities = [];
     this.wristDeviations = [];
-    this.velocityHistory = [];
+    this._velocityHistory = [];
     this.freezeStartTime = null;
     this.freezeCount = 0;
     this.totalFreezingTime = 0;
     this.freezeTimes = [];
     this.restingPositionSet = false;
     this.sessionStartTime = Date.now();
+    this.lastFrame = null;
+    this.lastFrameTime = 0;
+    this.stepCount = 0;
+    this.stride = null;
   }
 }

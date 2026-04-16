@@ -136,7 +136,7 @@ export async function predictHandwriting(
       console.log('[PREDICT] Type not specified - backend will auto-detect');
     }
     
-    const response = await fetch('http://localhost:5000/predict', {
+    const response = await fetch('http://localhost:5000/api/predict', {
       method: 'POST',
       body: formData,
     });

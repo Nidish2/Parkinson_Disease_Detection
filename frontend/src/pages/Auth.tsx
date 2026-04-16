@@ -1,10 +1,12 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AlertCircle, LoaderCircle, Mail, Lock, User, CheckCircle, Sparkles, Calendar, Activity, Ruler } from 'lucide-react';
+import { AlertCircle, LoaderCircle, Mail, Lock, User, CheckCircle, Sparkles, Calendar, Activity, Ruler, Building2, Phone, BriefcaseMedical, IdCard, GraduationCap, Briefcase } from 'lucide-react';
 import { mongodb } from '../lib/mongodbClient';
 import { useAuth } from '../hooks/useAuth';
 import { motion } from 'framer-motion';
 import Logo from '../components/Logo';
+import { getDashboardRouteForRole } from '../services/healthcareApi';
+import type { UserRole } from '../types/healthcare';
 
 const Auth = () => {
   const [isLogin, setIsLogin] = useState(true);
@@ -16,6 +18,15 @@ const Auth = () => {
   const [weight, setWeight] = useState<number | ''>('');
   const [height, setHeight] = useState<number | ''>('');
   const [clinicalStage, setClinicalStage] = useState('');
+  const [role, setRole] = useState<UserRole>('patient');
+  const [phone, setPhone] = useState('');
+  const [hospital, setHospital] = useState('');
+  const [specialties, setSpecialties] = useState('');
+  const [doctorIdentifier, setDoctorIdentifier] = useState('');
+  const [doctorAge, setDoctorAge] = useState<number | ''>('');
+  const [doctorGender, setDoctorGender] = useState('');
+  const [qualification, setQualification] = useState('');
+  const [yearsExperience, setYearsExperience] = useState<number | ''>('');
   const [consent, setConsent] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -27,9 +38,27 @@ const Auth = () => {
 
   useEffect(() => {
     if (user) {
-      navigate('/dashboard');
+      navigate(getDashboardRouteForRole(user.role));
     }
   }, [user, navigate]);
+
+  const resetSignupFields = () => {
+    setFullName('');
+    setGender('');
+    setDateOfBirth('');
+    setWeight('');
+    setHeight('');
+    setClinicalStage('');
+    setPhone('');
+    setHospital('');
+    setSpecialties('');
+    setDoctorIdentifier('');
+    setDoctorAge('');
+    setDoctorGender('');
+    setQualification('');
+    setYearsExperience('');
+    setConsent(false);
+  };
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -41,17 +70,42 @@ const Auth = () => {
       if (isLogin) {
         const { data, error } = await mongodb.signIn(email, password);
         if (error) throw new Error(error);
-        if (data?.access_token) {
-          navigate('/dashboard');
+        if (data?.access_token && data?.user) {
+          navigate(getDashboardRouteForRole(data.user.role));
         } else {
           throw new Error('Sign in failed');
         }
       } else {
-        const { data, error } = await mongodb.signUp(email, password, fullName, gender, dateOfBirth, weight !== '' ? Number(weight) : undefined, height !== '' ? Number(height) : undefined, clinicalStage || undefined);
+        const { data, error } = await mongodb.signUp(
+          email,
+          password,
+          fullName,
+          role === 'patient' ? gender : undefined,
+          role === 'patient' ? dateOfBirth : undefined,
+          role === 'patient' && weight !== '' ? Number(weight) : undefined,
+          role === 'patient' && height !== '' ? Number(height) : undefined,
+          role === 'patient' ? clinicalStage || undefined : undefined,
+          role,
+          phone || undefined,
+          role === 'doctor' ? hospital || undefined : undefined,
+          role === 'doctor'
+            ? specialties.split(',').map((item) => item.trim()).filter(Boolean)
+            : undefined,
+          role === 'doctor' ? doctorIdentifier || undefined : undefined,
+          role === 'doctor' && doctorAge !== '' ? Number(doctorAge) : undefined,
+          role === 'doctor' ? doctorGender || undefined : undefined,
+          role === 'doctor' ? qualification || undefined : undefined,
+          role === 'doctor' && yearsExperience !== '' ? Number(yearsExperience) : undefined,
+        );
         if (error) throw new Error(error);
-        if (data?.access_token) {
-          setMessage('Signup successful! You can now log in.');
+        if (data?.user?.role === 'doctor' && data.user.approval_status === 'pending') {
+          setMessage('Doctor account created successfully. You can sign in only after an admin approves your account.');
           setIsLogin(true);
+          setPassword('');
+          resetSignupFields();
+          mongodb.clearToken();
+        } else if (data?.access_token && data?.user) {
+          navigate(getDashboardRouteForRole(data.user.role));
         } else {
           throw new Error('Sign up failed');
         }
@@ -64,6 +118,8 @@ const Auth = () => {
         setError(`Unable to reach API at ${apiUrl}. Check your internet connection and make sure the backend server is running.`);
       } else if (message.includes('already exists')) {
         setError('User with this email already exists. Please sign in instead.');
+      } else if (message.toLowerCase().includes('waiting for admin approval')) {
+        setError('Doctor account is waiting for admin approval. Please sign in after approval.');
       } else {
         setError(message);
       }
@@ -89,7 +145,14 @@ const Auth = () => {
           {/* Logo and Header */}
           <div className="text-center mb-8">
             <div className="flex justify-center mb-4">
-              <Logo size="lg" />
+              <button
+                type="button"
+                onClick={() => navigate('/admin-login')}
+                className="rounded-xl transition-transform hover:scale-[1.02]"
+                title="Admin login"
+              >
+                <Logo size="lg" />
+              </button>
             </div>
             <motion.div
               initial={{ opacity: 0 }}
@@ -116,6 +179,27 @@ const Auth = () => {
                 animate={{ opacity: 1, height: 'auto' }}
                 exit={{ opacity: 0, height: 0 }}
               >
+                <label className="block text-sm font-medium text-gray-700 mb-1">Account Type</label>
+                <div className="grid grid-cols-2 gap-3 mb-4">
+                  {([
+                    { value: 'patient', label: 'Patient' },
+                    { value: 'doctor', label: 'Doctor' },
+                  ] as const).map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => setRole(option.value)}
+                      className={`rounded-lg border px-4 py-3 text-sm font-semibold transition-all ${
+                        role === option.value
+                          ? 'border-blue-500 bg-blue-50 text-blue-700'
+                          : 'border-gray-300 text-gray-600 hover:border-blue-300'
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+
                 <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
                 <div className="relative">
                   <User className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
@@ -128,94 +212,221 @@ const Auth = () => {
                     className="w-full bg-white text-gray-900 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none transition-all"
                   />
                 </div>
-                
-                <div className="grid grid-cols-2 gap-4 mt-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Gender</label>
-                    <div className="relative">
-                      <User className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
-                      <select
-                        required
-                        value={gender}
-                        onChange={e => setGender(e.target.value)}
-                        className="w-full bg-white text-gray-900 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none transition-all appearance-none"
-                      >
-                        <option value="" disabled>Select Gender</option>
-                        <option value="Male">Male</option>
-                        <option value="Female">Female</option>
-                        <option value="Other">Other</option>
-                      </select>
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Date of Birth</label>
-                    <div className="relative">
-                      <Calendar className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
-                      <input 
-                        type="date" 
-                        required 
-                        value={dateOfBirth} 
-                        onChange={e => setDateOfBirth(e.target.value)} 
-                        className="w-full bg-white text-gray-900 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none transition-all"
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-4 mt-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Weight (kg)</label>
-                    <div className="relative">
-                      <Activity className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
-                      <input 
-                        type="number" 
-                        placeholder="e.g. 70" 
-                        min="1"
-                        max="300"
-                        step="0.1"
-                        value={weight} 
-                        onChange={e => setWeight(e.target.value === '' ? '' : Number(e.target.value))} 
-                        className="w-full bg-white text-gray-900 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none transition-all"
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Height (cm)</label>
-                    <div className="relative">
-                      <Ruler className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
-                      <input 
-                        type="number" 
-                        placeholder="e.g. 175" 
-                        min="1"
-                        max="300"
-                        step="0.1"
-                        value={height} 
-                        onChange={e => setHeight(e.target.value === '' ? '' : Number(e.target.value))} 
-                        className="w-full bg-white text-gray-900 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none transition-all"
-                      />
-                    </div>
-                  </div>
-                </div>
-
                 <div className="mt-4">
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Clinical Stage (Optional)</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
                   <div className="relative">
-                    <Activity className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
-                    <select
-                      value={clinicalStage}
-                      onChange={e => setClinicalStage(e.target.value)}
-                      className="w-full bg-white text-gray-900 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none transition-all appearance-none"
-                    >
-                      <option value="" disabled>Select Clinical Stage</option>
-                      <option value="Not Diagnosed">Not Diagnosed</option>
-                      <option value="Stage 1">Stage 1</option>
-                      <option value="Stage 2">Stage 2</option>
-                      <option value="Stage 3">Stage 3</option>
-                      <option value="Stage 4">Stage 4</option>
-                      <option value="Stage 5">Stage 5</option>
-                    </select>
+                    <Phone className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+                    <input
+                      type="tel"
+                      placeholder="Enter contact number"
+                      value={phone}
+                      onChange={e => setPhone(e.target.value)}
+                      className="w-full bg-white text-gray-900 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none transition-all"
+                    />
                   </div>
                 </div>
+
+                {role === 'patient' ? (
+                  <>
+                    <div className="grid grid-cols-2 gap-4 mt-4">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Gender</label>
+                        <div className="relative">
+                          <User className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+                          <select
+                            required
+                            value={gender}
+                            onChange={e => setGender(e.target.value)}
+                            className="w-full bg-white text-gray-900 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none transition-all appearance-none"
+                          >
+                            <option value="" disabled>Select Gender</option>
+                            <option value="Male">Male</option>
+                            <option value="Female">Female</option>
+                            <option value="Other">Other</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Date of Birth</label>
+                        <div className="relative">
+                          <Calendar className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+                          <input
+                            type="date"
+                            required
+                            value={dateOfBirth}
+                            onChange={e => setDateOfBirth(e.target.value)}
+                            className="w-full bg-white text-gray-900 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none transition-all"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4 mt-4">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Weight (kg)</label>
+                        <div className="relative">
+                          <Activity className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+                          <input
+                            type="number"
+                            placeholder="e.g. 70"
+                            min="1"
+                            max="300"
+                            step="0.1"
+                            value={weight}
+                            onChange={e => setWeight(e.target.value === '' ? '' : Number(e.target.value))}
+                            className="w-full bg-white text-gray-900 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none transition-all"
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Height (cm)</label>
+                        <div className="relative">
+                          <Ruler className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+                          <input
+                            type="number"
+                            placeholder="e.g. 175"
+                            min="1"
+                            max="300"
+                            step="0.1"
+                            value={height}
+                            onChange={e => setHeight(e.target.value === '' ? '' : Number(e.target.value))}
+                            className="w-full bg-white text-gray-900 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none transition-all"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Clinical Stage (Optional)</label>
+                      <div className="relative">
+                        <Activity className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+                        <select
+                          value={clinicalStage}
+                          onChange={e => setClinicalStage(e.target.value)}
+                          className="w-full bg-white text-gray-900 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none transition-all appearance-none"
+                        >
+                          <option value="" disabled>Select Clinical Stage</option>
+                          <option value="Not Diagnosed">Not Diagnosed</option>
+                          <option value="Stage 1">Stage 1</option>
+                          <option value="Stage 2">Stage 2</option>
+                          <option value="Stage 3">Stage 3</option>
+                          <option value="Stage 4">Stage 4</option>
+                          <option value="Stage 5">Stage 5</option>
+                        </select>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-2 gap-4 mt-4">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Doctor ID / Registration No.</label>
+                        <div className="relative">
+                          <IdCard className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+                          <input
+                            type="text"
+                            placeholder="Enter doctor ID"
+                            value={doctorIdentifier}
+                            onChange={e => setDoctorIdentifier(e.target.value)}
+                            className="w-full bg-white text-gray-900 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none transition-all"
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Age</label>
+                        <div className="relative">
+                          <User className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+                          <input
+                            type="number"
+                            placeholder="e.g. 42"
+                            min="21"
+                            max="100"
+                            value={doctorAge}
+                            onChange={e => setDoctorAge(e.target.value === '' ? '' : Number(e.target.value))}
+                            className="w-full bg-white text-gray-900 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none transition-all"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4 mt-4">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Gender</label>
+                        <div className="relative">
+                          <User className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+                          <select
+                            value={doctorGender}
+                            onChange={e => setDoctorGender(e.target.value)}
+                            className="w-full bg-white text-gray-900 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none transition-all appearance-none"
+                          >
+                            <option value="" disabled>Select Gender</option>
+                            <option value="Male">Male</option>
+                            <option value="Female">Female</option>
+                            <option value="Other">Other</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Years of Experience</label>
+                        <div className="relative">
+                          <Briefcase className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+                          <input
+                            type="number"
+                            placeholder="e.g. 12"
+                            min="0"
+                            max="60"
+                            value={yearsExperience}
+                            onChange={e => setYearsExperience(e.target.value === '' ? '' : Number(e.target.value))}
+                            className="w-full bg-white text-gray-900 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none transition-all"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Hospital / Clinic</label>
+                      <div className="relative">
+                        <Building2 className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+                        <input
+                          type="text"
+                          placeholder="Enter hospital or clinic"
+                          value={hospital}
+                          onChange={e => setHospital(e.target.value)}
+                          className="w-full bg-white text-gray-900 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none transition-all"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Qualification</label>
+                      <div className="relative">
+                        <GraduationCap className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+                        <input
+                          type="text"
+                          placeholder="MBBS, MD Neurology"
+                          value={qualification}
+                          onChange={e => setQualification(e.target.value)}
+                          className="w-full bg-white text-gray-900 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none transition-all"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Specialties</label>
+                      <div className="relative">
+                        <BriefcaseMedical className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+                        <input
+                          type="text"
+                          placeholder="Movement Disorders, Tele-neurology"
+                          value={specialties}
+                          onChange={e => setSpecialties(e.target.value)}
+                          className="w-full bg-white text-gray-900 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none transition-all"
+                        />
+                      </div>
+                      <p className="text-xs text-gray-500 mt-2">Separate specialties with commas. Doctor accounts stay pending until approved by an admin.</p>
+                    </div>
+                  </>
+                )}
               </motion.div>
             )}
             
@@ -316,7 +527,7 @@ const Auth = () => {
               </div>
             </div>
             <button 
-              onClick={() => { setIsLogin(!isLogin); setError(null); setMessage(null); }} 
+              onClick={() => { setIsLogin(!isLogin); setError(null); setMessage(null); setRole('patient'); }} 
               className="mt-4 w-full text-blue-600 hover:text-blue-700 font-medium py-2 rounded-lg hover:bg-blue-50 transition-colors"
             >
               {isLogin ? 'Sign Up' : 'Sign In'}

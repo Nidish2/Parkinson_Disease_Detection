@@ -1,16 +1,22 @@
 import { useEffect, useState } from 'react';
 import Card from '../components/Card';
 import Chart from '../components/Chart';
-import { Activity, FileText, BarChart, LoaderCircle, TrendingUp, PieChart, List, HeartPulse, Droplets, ArrowRight } from 'lucide-react';
+import DigitalTwinCard from '../components/DigitalTwinCard';
+import { Activity, FileText, BarChart, LoaderCircle, TrendingUp, PieChart, List, HeartPulse, Droplets, ArrowRight, CalendarDays, Video, ClipboardList, MessageSquare } from 'lucide-react';
 import { mongodb } from '../lib/mongodbClient';
 import { TEST_QUERY_TIMEOUT_MS } from '../services/testPersistence';
 import { useAuth } from '../hooks/useAuth';
 import { Test } from '../types/database';
 import { Link } from 'react-router-dom';
+import { getLatestByModality } from '../services/fusionScoreService';
+import { ensureUnifiedReport, getAppointments, getReports } from '../services/healthcareApi';
+import type { AppointmentRecord, UnifiedReport } from '../types/healthcare';
+import { collapseAppointments, isRejectedAppointment, normalizeAppointmentStatus } from '../utils/appointments';
 
 const PROFILE_KEY = 'pd_nutrition_profile';
 const LOGS_KEY = 'pd_nutrition_logs';
 const BMI_HISTORY_KEY = 'pd_bmi_history';
+const LOCAL_APPOINTMENTS_KEY = 'local_appointments';
 
 const classifyBmi = (bmi: number) => {
   if (bmi < 18.5) return 'Underweight';
@@ -70,6 +76,11 @@ const getDistribution = (tests: Test[]) => tests.reduce((acc, test) => {
   acc[test.test_type] = (acc[test.test_type] || 0) + 1;
   return acc;
 }, {} as Record<string, number>);
+
+const toIndicatorScore = (score: number | null, fallback: number) => {
+  if (score === null) return fallback;
+  return Math.max(0, Math.min(100, Math.round(score * 10)));
+};
 
 const getRiskScoreChartOption = (tests: Test[]) => {
   const chartData = getRiskSeries(tests);
@@ -184,6 +195,8 @@ const Dashboard = () => {
     lastTestDate: 'N/A',
   });
   const [timeframe, setTimeframe] = useState<'all' | '30d' | '5'>('all');
+  const [reports, setReports] = useState<UnifiedReport[]>([]);
+  const [appointments, setAppointments] = useState<AppointmentRecord[]>([]);
 
   const calculateStats = (testsData: Test[], tf: 'all' | '30d' | '5' = timeframe) => {
     if (!testsData || testsData.length === 0) {
@@ -288,6 +301,63 @@ const Dashboard = () => {
     }
   };
 
+  const fetchWorkflowData = async () => {
+    if (!user || user.role !== 'patient') {
+      setReports([]);
+      setAppointments([]);
+      return;
+    }
+
+    try {
+      const [reportData, appointmentData] = await Promise.all([
+        getReports().catch(() => []),
+        getAppointments().catch(() => []),
+      ]);
+
+      let localAppointments: AppointmentRecord[] = [];
+      try {
+        localAppointments = (JSON.parse(localStorage.getItem(LOCAL_APPOINTMENTS_KEY) || '[]') as AppointmentRecord[])
+          .filter((appointment) => appointment.patient_id === user.id);
+      } catch (error) {
+        console.error('Failed to read local appointment cache:', error);
+      }
+
+      const byId = new Map<string, AppointmentRecord>();
+      [...localAppointments, ...appointmentData].forEach((appointment) => {
+        if (appointment?.id) {
+          byId.set(appointment.id, appointment);
+        }
+      });
+
+      const mergedAppointments = collapseAppointments(Array.from(byId.values()));
+
+      setReports(reportData);
+      setAppointments(mergedAppointments);
+    } catch (error) {
+      console.error('Failed to fetch patient workflow data:', error);
+      setReports([]);
+      setAppointments([]);
+    }
+  };
+
+  useEffect(() => {
+    const bootstrapReport = async () => {
+      if (!user || user.role !== 'patient' || reports.length > 0) return;
+      const latestFusionTest = tests.find((test) => test.test_type === 'fusion');
+      if (!latestFusionTest) return;
+
+      try {
+        await ensureUnifiedReport({ testId: latestFusionTest.id });
+        const refreshedReports = await getReports().catch(() => []);
+        setReports(refreshedReports);
+      } catch (error) {
+        console.error('Failed to bootstrap unified report from fusion test:', error);
+      }
+    };
+
+    bootstrapReport();
+  }, [reports.length, tests, user]);
+
   useEffect(() => {
     console.log('Dashboard useEffect - authLoading:', authLoading, 'user:', user);
     
@@ -319,6 +389,7 @@ const Dashboard = () => {
           setInitialLoadComplete(true);
           // Still fetch in background to update
           fetchTests(true);
+          fetchWorkflowData();
           return;
         }
       } catch (e) {
@@ -328,6 +399,7 @@ const Dashboard = () => {
     
     // Call fetchTests immediately
     fetchTests();
+    fetchWorkflowData();
     
     // Setup realtime subscriptions
     const channel = mongodb.channel('realtime-dashboard')
@@ -342,6 +414,7 @@ const Dashboard = () => {
     const pollInterval = setInterval(() => {
       console.log('🔄 Polling for new tests...');
       fetchTests(true); // Silent refresh
+      fetchWorkflowData();
     }, 5000);
 
     // Listen for storage events from other tabs/windows
@@ -350,14 +423,24 @@ const Dashboard = () => {
         console.log('📢 Storage change detected, refreshing tests...');
         fetchTests(true); // Silent refresh
       }
+      if (e.key === LOCAL_APPOINTMENTS_KEY) {
+        fetchWorkflowData();
+      }
+    };
+
+    const handleWindowFocus = () => {
+      fetchTests(true);
+      fetchWorkflowData();
     };
 
     window.addEventListener('storage', handleStorageChange);
+    window.addEventListener('focus', handleWindowFocus);
 
     return () => {
         mongodb.removeChannel(channel);
         clearInterval(pollInterval);
         window.removeEventListener('storage', handleStorageChange);
+        window.removeEventListener('focus', handleWindowFocus);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authLoading, user]);
@@ -374,7 +457,7 @@ const Dashboard = () => {
           We couldn&apos;t find an active session. Please sign in again to access your personal analytics and test history.
         </p>
         <Link
-          to="/auth"
+          to="/login"
           className="rounded-full bg-primary px-8 py-3 font-semibold text-primary-foreground hover:scale-105 shadow-soft transition-all duration-300 active:scale-95"
         >
           Go to Sign In
@@ -392,10 +475,29 @@ const Dashboard = () => {
   const trendDirection = riskDelta === null ? 'Stable' : riskDelta > 0 ? 'Up' : riskDelta < 0 ? 'Down' : 'Stable';
 
   const distribution = getDistribution(tests);
+  const latestReport = reports[0] || null;
+  const nonRejectedAppointments = appointments.filter((appointment) => !isRejectedAppointment(appointment));
+  const latestReportAppointment = latestReport
+    ? nonRejectedAppointments.find((appointment) => appointment.report_id === latestReport.id)
+    : null;
+  const prescriptionAppointment = nonRejectedAppointments.find((appointment) => appointment.report?.prescription?.length);
+  const upcomingAppointment = latestReportAppointment
+    || prescriptionAppointment
+    || [...nonRejectedAppointments]
+      .sort((a, b) => new Date(a.appointment_date).getTime() - new Date(b.appointment_date).getTime())
+      .find((appointment) => normalizeAppointmentStatus(appointment.status) !== 'completed')
+    || nonRejectedAppointments[0]
+    || null;
   const distributionEntries = Object.entries(distribution)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5);
   const distributionPalette = ['#5D7052', '#C18C5D', '#A85448', '#4A4A40', '#78786C'];
+  const latestByModality = getLatestByModality(tests);
+  const digitalTwinMetrics = {
+    handTremor: toIndicatorScore(latestByModality.spiral ? deriveRiskScore(latestByModality.spiral) : null, 65),
+    voiceStability: toIndicatorScore(latestByModality.speech ? deriveRiskScore(latestByModality.speech) : null, 50),
+    drawingAccuracy: toIndicatorScore(latestByModality.wave ? deriveRiskScore(latestByModality.wave) : null, 70),
+  };
 
   const nutritionProfile = (() => {
     try {
@@ -467,6 +569,178 @@ const Dashboard = () => {
             <div className="p-2 bg-accent-foreground/5 rounded-2xl"><FileText className="h-5 w-5 text-accent-foreground" /></div>
           </div>
           <p className="text-3xl font-serif font-bold mt-3 text-foreground">{stats.lastTestDate}</p>
+        </Card>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        <Card className="rounded-organic-4 bg-background/70 dark:bg-accent/35">
+          <div className="flex items-start justify-between gap-4 border-b border-border/30 pb-4">
+            <div className="flex items-center gap-3">
+              <div className="p-3 rounded-2xl bg-primary/10">
+                <ClipboardList className="h-6 w-6 text-primary" />
+              </div>
+              <div>
+                <h3 className="font-serif text-2xl font-bold text-foreground">Latest Unified Report</h3>
+                <p className="text-sm text-muted-foreground">AI results and doctor review stay together in one report.</p>
+              </div>
+            </div>
+            <Link
+              to="/comprehensive-screening"
+              className="inline-flex items-center gap-2 rounded-full border border-border/40 px-4 py-2 text-sm font-semibold text-foreground hover:bg-muted/40 transition-colors"
+            >
+              Update AI Report
+            </Link>
+          </div>
+          {latestReport ? (
+            <div className="mt-5 space-y-4">
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="rounded-2xl border border-border/40 bg-background/60 p-4">
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground font-semibold">Status</p>
+                  <p className="text-xl font-serif font-bold text-foreground mt-1 capitalize">{latestReport.status}</p>
+                </div>
+                <div className="rounded-2xl border border-border/40 bg-background/60 p-4">
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground font-semibold">AI Risk</p>
+                  <p className="text-xl font-serif font-bold text-foreground mt-1">{latestReport.aiResults?.summary?.riskScore?.toFixed?.(1) ?? 'N/A'} / 10</p>
+                </div>
+                <div className="rounded-2xl border border-border/40 bg-background/60 p-4">
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground font-semibold">Doctor Notes</p>
+                  <p className="text-xl font-serif font-bold text-foreground mt-1">{latestReport.doctorNotes ? 'Available' : 'Pending'}</p>
+                </div>
+              </div>
+              {latestReport.prescription?.length > 0 && (
+                <div className="rounded-2xl border border-border/40 bg-background/50 p-4">
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground font-semibold">Prescription</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {latestReport.prescription.map((item, index) => (
+                      <span key={`${item}-${index}`} className="rounded-full bg-primary/10 px-3 py-1.5 text-sm font-semibold text-primary">
+                        {item}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div className="rounded-2xl border border-border/40 bg-background/50 p-4">
+                <p className="text-xs uppercase tracking-wide text-muted-foreground font-semibold">Summary</p>
+                <p className="text-sm text-foreground mt-2 leading-relaxed">
+                  {latestReport.doctorNotes || latestReport.aiResults?.fusion?.recommendations?.[0] || 'Your latest AI report is ready for review. Book an appointment to get a doctor prescription added to the same report.'}
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-3">
+                <Link
+                  to={`/reports/${latestReport.id}`}
+                  className="inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground hover:bg-primary/90 transition-colors"
+                >
+                  View Report
+                </Link>
+                <Link
+                  to="/consult"
+                  className="inline-flex items-center gap-2 rounded-full border border-border/50 px-5 py-2.5 text-sm font-semibold text-foreground hover:bg-muted/40 transition-colors"
+                >
+                  Book Appointment
+                </Link>
+              </div>
+            </div>
+          ) : (
+            <div className="mt-5 rounded-2xl border border-dashed border-border/60 bg-background/40 p-6 text-center">
+              <p className="font-serif text-xl font-bold text-foreground">No unified report yet</p>
+              <p className="text-sm text-muted-foreground mt-2">Save your comprehensive AI screening first, then book a doctor review.</p>
+              <Link
+                to="/comprehensive-screening"
+                className="inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground hover:bg-primary/90 transition-colors mt-4"
+              >
+                Create AI Report
+              </Link>
+            </div>
+          )}
+        </Card>
+
+        <Card className="rounded-organic-1 bg-background/70 dark:bg-accent/35">
+          <div className="flex items-start justify-between gap-4 border-b border-border/30 pb-4">
+            <div className="flex items-center gap-3">
+              <div className="p-3 rounded-2xl bg-secondary/10">
+                <CalendarDays className="h-6 w-6 text-secondary" />
+              </div>
+              <div>
+                <h3 className="font-serif text-2xl font-bold text-foreground">Appointments & Calls</h3>
+                <p className="text-sm text-muted-foreground">Move from AI screening to doctor consultation without leaving the same workflow.</p>
+              </div>
+            </div>
+          </div>
+          {upcomingAppointment ? (
+            <div className="mt-5 space-y-4">
+              <div className="rounded-2xl border border-border/40 bg-background/60 p-4">
+                <p className="text-xs uppercase tracking-wide text-muted-foreground font-semibold">Next Appointment</p>
+                <p className="text-xl font-serif font-bold text-foreground mt-1">{upcomingAppointment.doctorDetails?.full_name || upcomingAppointment.doctor_name || 'Assigned Doctor'}</p>
+                <p className="text-sm text-muted-foreground mt-2">
+                  {new Date(upcomingAppointment.appointment_date).toLocaleDateString()} at {upcomingAppointment.appointment_time}
+                </p>
+                <p className="text-sm text-muted-foreground mt-1 capitalize">
+                  {upcomingAppointment.consultation_type} consultation • {upcomingAppointment.status}
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-3">
+                {upcomingAppointment.call_url && upcomingAppointment.status === 'accepted' && (
+                  <a
+                    href={upcomingAppointment.call_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground hover:bg-primary/90 transition-colors"
+                  >
+                    <Video className="h-4 w-4" /> Join Call
+                  </a>
+                )}
+                {upcomingAppointment.status === 'accepted' ? (
+                  <Link
+                    to={`/appointments/${upcomingAppointment.id}/communication`}
+                    className="inline-flex items-center gap-2 rounded-full border border-border/50 px-5 py-2.5 text-sm font-semibold text-foreground hover:bg-muted/40 transition-colors"
+                  >
+                    <MessageSquare className="h-4 w-4" /> Chat
+                  </Link>
+                ) : (
+                  <span className="inline-flex items-center gap-2 rounded-full border border-border/40 px-5 py-2.5 text-sm font-semibold text-muted-foreground">
+                    <MessageSquare className="h-4 w-4" /> Waiting for doctor
+                  </span>
+                )}
+                {upcomingAppointment.report_id && (
+                  <Link
+                    to={`/reports/${upcomingAppointment.report_id}`}
+                    className="inline-flex items-center gap-2 rounded-full border border-border/50 px-5 py-2.5 text-sm font-semibold text-foreground hover:bg-muted/40 transition-colors"
+                  >
+                    Open Linked Report
+                  </Link>
+                )}
+                <Link
+                  to="/consult"
+                  className="inline-flex items-center gap-2 rounded-full border border-border/50 px-5 py-2.5 text-sm font-semibold text-foreground hover:bg-muted/40 transition-colors"
+                >
+                  Book Appointment
+                </Link>
+              </div>
+              {upcomingAppointment.report?.prescription?.length ? (
+                <div className="rounded-2xl border border-border/40 bg-background/50 p-4">
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground font-semibold">Latest Prescription</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {upcomingAppointment.report.prescription.map((item, index) => (
+                      <span key={`${item}-${index}`} className="rounded-full bg-primary/10 px-3 py-1.5 text-sm font-semibold text-primary">
+                        {item}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <div className="mt-5 rounded-2xl border border-dashed border-border/60 bg-background/40 p-6 text-center">
+              <p className="font-serif text-xl font-bold text-foreground">No appointments scheduled</p>
+              <p className="text-sm text-muted-foreground mt-2">Choose an approved doctor and link your latest report to start clinical review.</p>
+              <Link
+                to="/consult"
+                className="inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground hover:bg-primary/90 transition-colors mt-4"
+              >
+                Book Appointment
+              </Link>
+            </div>
+          )}
         </Card>
       </div>
 
@@ -552,6 +826,12 @@ const Dashboard = () => {
         </Card>
       </div>
 
+      <DigitalTwinCard
+        handTremor={digitalTwinMetrics.handTremor}
+        voiceStability={digitalTwinMetrics.voiceStability}
+        drawingAccuracy={digitalTwinMetrics.drawingAccuracy}
+      />
+
       <Card className="rounded-organic-2 bg-background/70 dark:bg-accent/35">
         <div className="flex justify-between items-center mb-6 border-b border-border/30 pb-4">
             <h3 className="font-serif text-lg font-bold flex items-center text-foreground"><List size={18} className="mr-2 text-primary" /> Recent Tests</h3>
@@ -575,6 +855,59 @@ const Dashboard = () => {
             </div>
           )})}
           {tests.length === 0 && <p className="text-center text-muted-foreground py-8">You haven't performed any tests yet.</p>}
+        </div>
+      </Card>
+
+      <Card className="rounded-organic-1 bg-background/70 dark:bg-accent/35">
+        <div className="flex justify-between items-center mb-6 border-b border-border/30 pb-4">
+            <div>
+              <h3 className="font-serif text-lg font-bold flex items-center text-foreground"><ClipboardList size={18} className="mr-2 text-secondary" /> Test Histories & Doctor Feedback</h3>
+              <p className="text-sm text-muted-foreground mt-1">All reviewed tests with doctor notes and recommendations</p>
+            </div>
+        </div>
+        <div className="space-y-3">
+          {reports.map((report, index) => (
+            <div key={`${report.id}-${index}`} className="rounded-2xl border border-border/30 bg-background/50 p-4 hover:bg-muted/20 transition-all duration-300">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div className="flex-grow space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-bold uppercase tracking-wider text-primary bg-primary/10 px-3 py-1 rounded-full">{report.status}</span>
+                    <p className="text-sm text-muted-foreground">{new Date(report.created_at).toLocaleDateString()}</p>
+                  </div>
+                  {report.aiResults?.fusion?.summary && (
+                    <p className="text-sm text-foreground font-medium">{report.aiResults.fusion.summary}</p>
+                  )}
+                  {report.doctorNotes && (
+                    <div className="mt-2 p-3 rounded-xl bg-secondary/5 border border-secondary/20">
+                      <p className="text-xs font-bold text-secondary mb-1">Doctor Feedback:</p>
+                      <p className="text-sm text-foreground">{report.doctorNotes}</p>
+                    </div>
+                  )}
+                  {report.prescription?.length > 0 && (
+                    <div className="flex flex-wrap gap-2 mt-2">
+                      {report.prescription.map((item, idx) => (
+                        <span key={`${report.id}-rx-${idx}`} className="text-xs font-semibold bg-primary/10 text-primary px-2.5 py-1 rounded-full">
+                          {item}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <Link
+                  to={`/reports/${report.id}`}
+                  className="inline-flex items-center gap-2 rounded-full bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary/90 transition-colors whitespace-nowrap"
+                >
+                  View Full Report
+                </Link>
+              </div>
+            </div>
+          ))}
+          {reports.length === 0 && (
+            <div className="text-center py-6 text-muted-foreground">
+              <p className="font-medium">No reviewed reports yet</p>
+              <p className="text-sm mt-1">Book a doctor consultation to get your report reviewed and receive feedback</p>
+            </div>
+          )}
         </div>
       </Card>
 

@@ -87,8 +87,9 @@ export interface SessionReport {
   exercisesCompleted: number;
   totalReps: number;
   durationMinutes: number;
-  // NEW: Add accuracy to the report
+  // NEW: Add accuracy and total exercises to the report
   averageAccuracy: number;
+  totalExercises: number;
   summary: string;
   recommendations: string[];
   exercisePlan: Array<{

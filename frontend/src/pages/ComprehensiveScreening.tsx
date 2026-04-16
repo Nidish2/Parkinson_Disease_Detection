@@ -32,13 +32,12 @@ import {
   type ModalityResult,
 } from '../services/fusionScoreService';
 import { TEST_QUERY_TIMEOUT_MS, insertTestRecord } from '../services/testPersistence';
+import { ensureUnifiedReport } from '../services/healthcareApi';
 
 /* ─── PDF Export utility ─── */
 const exportToPDF = async (fusion: FusionResult, userName: string, userId: string) => {
   const now = new Date();
   const dateStr = now.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-  const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-
   // Fetch Vitals (BMI etc)
   let nutrition: any = null;
   let patientProfile: any = null;
@@ -55,6 +54,7 @@ const exportToPDF = async (fusion: FusionResult, userName: string, userId: strin
     const { data, error } = await (mongodb as any)
       .from('tests')
       .select('*')
+      .eq('patient_id', userId)
       .eq('test_type', 'nutrition')
       .order('created_at', { ascending: false });
     if (!error && Array.isArray(data) && data.length > 0) {
@@ -197,16 +197,9 @@ const exportToPDF = async (fusion: FusionResult, userName: string, userId: strin
       ${recsHtml}
     </div>
 
-    <div class="section-title">Physician Notes & Prescription</div>
-    <div style="margin-top:8px;">
-      <div style="border-bottom:1px solid #e2e8f0;height:24px;"></div>
-      <div style="border-bottom:1px solid #e2e8f0;height:24px;"></div>
-      <div style="border-bottom:1px solid #e2e8f0;height:24px;"></div>
-    </div>
-    
     <div style="margin-top:30px;display:flex;justify-content:space-between;align-items:flex-end;font-size:10px;">
       <div style="width:200px;border-top:1px solid #0f172a;padding-top:5px;">
-        <p style="margin:0;font-weight:800;text-transform:uppercase;">Physician Signature</p>
+        <p style="margin:0;font-weight:800;text-transform:uppercase;">Assessment Signature</p>
       </div>
       <div style="width:120px;border-top:1.5px solid #0f172a;padding-top:5px;text-align:right;">
         <p style="margin:0;font-weight:800;text-transform:uppercase;">Date</p>
@@ -424,6 +417,7 @@ const ComprehensiveScreening = () => {
     if (!fusion || !user) return;
     setSaving(true); setError(null);
     try {
+      let savedTestId: string | null = null;
       const rec = {
         patient_id: user.id, test_type: 'fusion',
         raw_storage_path: null, status: 'completed', created_at: new Date().toISOString(),
@@ -439,10 +433,21 @@ const ComprehensiveScreening = () => {
       try {
         const { id, error: insErr } = await insertTestRecord(rec as Record<string, unknown>);
         if (!id) throw new Error(insErr || 'Database error');
+        savedTestId = id;
       } catch {
         const l = JSON.parse(localStorage.getItem('local_tests') || '[]');
-        l.unshift({ ...rec, id: `fusion-local-${Date.now()}` });
+        const localId = `fusion-local-${Date.now()}`;
+        l.unshift({ ...rec, id: localId });
         localStorage.setItem('local_tests', JSON.stringify(l));
+        savedTestId = localId;
+      }
+
+      if (savedTestId && !savedTestId.startsWith('fusion-local-')) {
+        try {
+          await ensureUnifiedReport({ testId: savedTestId });
+        } catch (reportError) {
+          console.error('Failed to ensure unified report:', reportError);
+        }
       }
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);

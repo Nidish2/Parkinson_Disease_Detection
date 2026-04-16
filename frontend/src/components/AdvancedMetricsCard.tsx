@@ -115,13 +115,13 @@ export default function AdvancedMetricsCard({
   }
 
   return (
-    <Card className="space-y-6 rounded-organic-2 border-2 border-dashed border-amber-200 bg-gradient-to-br from-amber-50 to-orange-50 p-6">
-      <div className="border-b-2 border-amber-200 pb-4">
-        <h2 className="flex items-center gap-2 text-xl font-bold text-amber-900">
-          <AlertCircle className="h-5 w-5" />
+    <Card className="space-y-6 rounded-organic-2 border-none bg-background/80 backdrop-blur-md shadow-soft p-6">
+      <div className="border-b border-border/50 pb-4">
+        <h2 className="flex items-center gap-2 text-xl font-bold text-foreground">
+          <AlertCircle className="h-5 w-5 text-primary" />
           Advanced Movement Analysis
         </h2>
-        <p className="mt-1 text-sm text-amber-700">Clinical-grade symptom assessment</p>
+        <p className="mt-1 text-sm text-muted-foreground">Clinical-grade symptom assessment</p>
       </div>
 
       {/* Rigidity Metrics */}
@@ -171,7 +171,7 @@ export default function AdvancedMetricsCard({
           </div>
 
           {report.freezingEvents > 0 && (
-            <div className="space-y-2 rounded-lg bg-white p-4">
+            <div className="space-y-2 rounded-2xl bg-background/50 border border-border/40 p-4">
               <div className="flex justify-between">
                 <span className="text-sm">Freezing Events</span>
                 <span className="font-bold text-red-600">{report.freezingEvents}</span>
@@ -202,7 +202,7 @@ export default function AdvancedMetricsCard({
       {report.gaitMetrics && (
         <div className="space-y-4">
           <h3 className="font-semibold text-gray-800">Gait Analysis</h3>
-          <div className="grid grid-cols-2 gap-4 rounded-lg bg-white p-4">
+          <div className="grid grid-cols-2 gap-4 rounded-2xl bg-background/50 border border-border/40 p-4">
             <div>
               <p className="text-xs text-gray-600">Stride Type</p>
               <p className="font-bold capitalize">{report.gaitMetrics.stride}</p>
@@ -263,7 +263,7 @@ export default function AdvancedMetricsCard({
 
       {/* Progression Trend Summary */}
       {trend && (
-        <div className="rounded-lg bg-white p-4">
+        <div className="rounded-2xl bg-background/50 border border-border/40 p-4">
           <h4 className="mb-3 font-semibold text-gray-800">Weekly Trend</h4>
           <div className="space-y-2 text-sm">
             {trend.tremor && (

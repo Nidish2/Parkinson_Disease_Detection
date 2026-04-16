@@ -23,6 +23,9 @@ DATABASE_NAME = os.getenv('DATABASE_NAME', 'parkinsons_care')
 JWT_SECRET = os.getenv('JWT_SECRET', 'your-secret-key-change-in-production')
 JWT_ALGORITHM = 'HS256'
 JWT_EXPIRATION_MINUTES = 30
+DEFAULT_ADMIN_EMAIL = 'admin@neurocare.local'
+DEFAULT_ADMIN_PASSWORD = 'NeuroCareAdmin@123'
+DEFAULT_ADMIN_NAME = 'NeuroCare Admin'
 
 class MongoDBService:
     def __init__(self):
@@ -34,6 +37,7 @@ class MongoDBService:
             self.db = self.client[DATABASE_NAME]
             self.fs = gridfs.GridFS(self.db)
             self._ensure_indexes()
+            self._ensure_default_admin_account()
         except Exception as e:
             print(f"⚠️ MongoDB connection error: {e}")
             print(f"   URI: {MONGODB_URI}")
@@ -49,6 +53,10 @@ class MongoDBService:
         # Users collection
         self.db.users.create_index('email', unique=True)
         self.db.users.create_index('patient_id')
+        self.db.users.create_index('role')
+        self.db.users.create_index('approval_status')
+        self.db.chat_messages.create_index('appointment_id')
+        self.db.chat_messages.create_index('created_at')
         
         # Tests collection
         self.db.tests.create_index('patient_id')
@@ -56,11 +64,16 @@ class MongoDBService:
         
         # Appointments collection
         self.db.appointments.create_index('patient_id')
+        self.db.appointments.create_index('doctor_id')
+        self.db.appointments.create_index('report_id')
+        self.db.appointments.create_index('status')
         self.db.appointments.create_index('appointment_date')
         
         # Reports collection
         self.db.reports.create_index('patient_id')
         self.db.reports.create_index('test_id')
+        self.db.reports.create_index('doctor_id')
+        self.db.reports.create_index('status')
     
     def _to_dict(self, doc):
         """Convert MongoDB document to JSON-friendly dict (nested ObjectId/datetime safe)."""
@@ -79,18 +92,87 @@ class MongoDBService:
         if isinstance(doc, list):
             return [self._to_dict(item) for item in doc]
         return doc
+
+    def _normalize_specialties(self, specialties):
+        if specialties is None:
+            return []
+        if isinstance(specialties, list):
+            return [str(item).strip() for item in specialties if str(item).strip()]
+        if isinstance(specialties, str):
+            return [item.strip() for item in specialties.split(',') if item.strip()]
+        return []
+
+    def _serialize_user(self, user_doc):
+        if not user_doc:
+            return None
+        return {
+            'id': str(user_doc['_id']),
+            'email': user_doc['email'],
+            'full_name': user_doc.get('full_name'),
+            'role': user_doc.get('role', 'patient'),
+            'approval_status': user_doc.get('approval_status', 'approved'),
+            'phone': user_doc.get('phone'),
+            'hospital': user_doc.get('hospital'),
+            'specialties': user_doc.get('specialties', []),
+            'doctor_identifier': user_doc.get('doctor_identifier'),
+            'age': user_doc.get('age'),
+            'gender': user_doc.get('gender'),
+            'qualification': user_doc.get('qualification'),
+            'years_experience': user_doc.get('years_experience'),
+            'availability_slots': user_doc.get('availability_slots', []),
+            'created_at': user_doc.get('created_at').isoformat() if isinstance(user_doc.get('created_at'), datetime) else user_doc.get('created_at'),
+        }
+
+    def _ensure_default_admin_account(self):
+        """Seed a hidden default admin account in MongoDB."""
+        existing_admin = self.db.users.find_one({'email': DEFAULT_ADMIN_EMAIL})
+        admin_payload = {
+            'email': DEFAULT_ADMIN_EMAIL,
+            'password_hash': generate_password_hash(DEFAULT_ADMIN_PASSWORD),
+            'full_name': DEFAULT_ADMIN_NAME,
+            'role': 'admin',
+            'approval_status': 'approved',
+            'phone': None,
+            'hospital': 'NeuroCare Central',
+            'specialties': ['Platform Administration'],
+            'updated_at': datetime.utcnow(),
+        }
+
+        if existing_admin:
+            self.db.users.update_one({'_id': existing_admin['_id']}, {'$set': admin_payload})
+        else:
+            self.db.users.insert_one({
+                **admin_payload,
+                'created_at': datetime.utcnow(),
+            })
     
     # Authentication methods
-    def create_user(self, email: str, password: str, full_name: str = None, gender: str = None, date_of_birth: str = None, weight: float = None, height: float = None, clinical_stage: str = None):
+    def create_user(self, email: str, password: str, full_name: str = None, gender: str = None, date_of_birth: str = None, weight: float = None, height: float = None, clinical_stage: str = None, role: str = 'patient', phone: str = None, hospital: str = None, specialties = None, doctor_identifier: str = None, age: int = None, doctor_gender: str = None, qualification: str = None, years_experience: int = None):
         """Create a new user"""
         try:
+            role = (role or 'patient').strip().lower()
+            if role not in ['patient', 'doctor', 'admin']:
+                raise ValueError('Invalid role')
+
+            approval_status = 'pending' if role == 'doctor' else 'approved'
             user_doc = {
                 'email': email,
                 'password_hash': generate_password_hash(password),
                 'full_name': full_name,
-                'created_at': datetime.utcnow(),
-                'updated_at': datetime.utcnow(),
-            }
+                'role': role,
+                'approval_status': approval_status,
+                'phone': phone,
+                'hospital': hospital,
+                'specialties': self._normalize_specialties(specialties),
+                'doctor_identifier': doctor_identifier,
+                'age': age,
+                'gender': doctor_gender if role == 'doctor' else gender,
+            'qualification': qualification,
+            'years_experience': years_experience,
+            'availability_slots': [],
+            'created_at': datetime.utcnow(),
+            'updated_at': datetime.utcnow(),
+        }
             result = self.db.users.insert_one(user_doc)
             
             # Calculate BMI and Class
@@ -122,29 +204,27 @@ class MongoDBService:
                 except Exception:
                     pass
             
-            # Create patient profile
-            profile_doc = {
-                'id': str(result.inserted_id),
-                'patient_id': str(result.inserted_id),
-                'full_name': full_name,
-                'gender': gender,
-                'date_of_birth': date_of_birth,
-                'age': age,
-                'weightKg': float(weight) if weight else None,
-                'heightCm': float(height) if height else None,
-                'stage': clinical_stage,
-                'bmi': bmi,
-                'bmiClass': bmi_class,
-                'created_at': datetime.utcnow(),
-                'updated_at': datetime.utcnow(),
-            }
-            self.db.patient_profiles.insert_one(profile_doc)
-            
-            return {
-                'id': str(result.inserted_id),
-                'email': email,
-                'full_name': full_name,
-            }
+            if role == 'patient':
+                # Create patient profile
+                profile_doc = {
+                    'id': str(result.inserted_id),
+                    'patient_id': str(result.inserted_id),
+                    'full_name': full_name,
+                    'gender': gender,
+                    'date_of_birth': date_of_birth,
+                    'age': age,
+                    'weightKg': float(weight) if weight else None,
+                    'heightCm': float(height) if height else None,
+                    'stage': clinical_stage,
+                    'bmi': bmi,
+                    'bmiClass': bmi_class,
+                    'created_at': datetime.utcnow(),
+                    'updated_at': datetime.utcnow(),
+                }
+                self.db.patient_profiles.insert_one(profile_doc)
+
+            created_user = self.db.users.find_one({'_id': result.inserted_id})
+            return self._serialize_user(created_user)
         except DuplicateKeyError:
             raise ValueError('User with this email already exists')
     
@@ -156,12 +236,8 @@ class MongoDBService:
         
         if not check_password_hash(user['password_hash'], password):
             return None
-        
-        return {
-            'id': str(user['_id']),
-            'email': user['email'],
-            'full_name': user.get('full_name'),
-        }
+
+        return self._serialize_user(user)
     
     def generate_token(self, user_id: str, email: str):
         """Generate JWT token"""
@@ -188,14 +264,124 @@ class MongoDBService:
             user_id = payload.get('user_id')
             user = self.db.users.find_one({'_id': ObjectId(user_id)})
             if user:
-                return {
-                    'id': str(user['_id']),
-                    'email': user['email'],
-                    'full_name': user.get('full_name'),
-                }
+                return self._serialize_user(user)
         except JWTError:
             pass
         return None
+
+    def get_user_by_id(self, user_id: str):
+        try:
+            user = self.db.users.find_one({'_id': ObjectId(user_id)})
+            return self._serialize_user(user)
+        except Exception:
+            return None
+
+    def list_users(self, filters: dict = None):
+        filters = filters or {}
+        users = self.db.users.find(filters).sort('created_at', -1)
+        return [self._serialize_user(user) for user in users]
+
+    def update_user(self, user_id: str, updates: dict):
+        payload = {**updates, 'updated_at': datetime.utcnow()}
+        result = self.db.users.update_one({'_id': ObjectId(user_id)}, {'$set': payload})
+        if result.matched_count == 0:
+            return None
+        return self.get_user_by_id(user_id)
+
+    def list_approved_doctors(self):
+        doctors = self.db.users.find({
+            'role': 'doctor',
+            'approval_status': 'approved',
+        }).sort('created_at', -1)
+        return [self._serialize_user(doctor) for doctor in doctors]
+
+    def get_patient_profile_details(self, patient_id: str):
+        profile = self.db.patient_profiles.find_one({'id': patient_id}) or self.db.patient_profiles.find_one({'patient_id': patient_id})
+        return self._to_dict(profile)
+
+    def get_latest_test_for_patient(self, patient_id: str, test_type: str = None):
+        query = {'patient_id': patient_id}
+        if test_type:
+            query['test_type'] = test_type
+        test = self.db.tests.find_one(query, sort=[('created_at', -1)])
+        return self._to_dict(test)
+
+    def list_tests_for_patient(self, patient_id: str, limit: int = None):
+        query = self.db.tests.find({'patient_id': patient_id}).sort('created_at', -1)
+        if limit:
+            query = query.limit(limit)
+        return [self._to_dict(doc) for doc in query]
+
+    def get_report_by_id(self, report_id: str):
+        try:
+            report = self.db.reports.find_one({'_id': ObjectId(report_id)})
+        except Exception:
+            report = self.db.reports.find_one({'id': report_id})
+        return self._to_dict(report)
+
+    def find_report(self, filter_dict: dict):
+        doc = self.db.reports.find_one(filter_dict)
+        return self._to_dict(doc)
+
+    def create_report(self, report_doc: dict):
+        report_doc['created_at'] = datetime.utcnow()
+        report_doc['updated_at'] = datetime.utcnow()
+        result = self.db.reports.insert_one(report_doc)
+        return self.get_report_by_id(str(result.inserted_id))
+
+    def update_report(self, report_id: str, updates: dict):
+        payload = {**updates, 'updated_at': datetime.utcnow()}
+        result = self.db.reports.update_one({'_id': ObjectId(report_id)}, {'$set': payload})
+        if result.matched_count == 0:
+            return None
+        return self.get_report_by_id(report_id)
+
+    def list_reports(self, filter_dict: dict = None):
+        query = self.db.reports.find(filter_dict or {}).sort('updated_at', -1)
+        return [self._to_dict(doc) for doc in query]
+
+    def create_appointment(self, appointment_doc: dict):
+        object_id = ObjectId()
+        appointment_doc['_id'] = object_id
+        appointment_doc['id'] = str(object_id)
+        appointment_doc['created_at'] = datetime.utcnow()
+        appointment_doc['updated_at'] = datetime.utcnow()
+        result = self.db.appointments.insert_one(appointment_doc)
+        return self.get_appointment_by_id(str(result.inserted_id))
+
+    def get_appointment_by_id(self, appointment_id: str):
+        try:
+            appointment = self.db.appointments.find_one({'_id': ObjectId(appointment_id)})
+        except Exception:
+            appointment = self.db.appointments.find_one({'id': appointment_id})
+        if appointment is None:
+            appointment = self.db.appointments.find_one({'id': appointment_id})
+        return self._to_dict(appointment)
+
+    def update_appointment(self, appointment_id: str, updates: dict):
+        payload = {**updates, 'updated_at': datetime.utcnow()}
+        try:
+            result = self.db.appointments.update_one({'_id': ObjectId(appointment_id)}, {'$set': payload})
+        except Exception:
+            result = self.db.appointments.update_one({'id': appointment_id}, {'$set': payload})
+        if result.matched_count == 0:
+            result = self.db.appointments.update_one({'id': appointment_id}, {'$set': payload})
+        if result.matched_count == 0:
+            return None
+        return self.get_appointment_by_id(appointment_id)
+
+    def list_appointments(self, filter_dict: dict = None):
+        query = self.db.appointments.find(filter_dict or {}).sort('appointment_date', 1)
+        return [self._to_dict(doc) for doc in query]
+
+    def create_chat_message(self, message_doc: dict):
+        message_doc['created_at'] = datetime.utcnow()
+        result = self.db.chat_messages.insert_one(message_doc)
+        return self._to_dict(self.db.chat_messages.find_one({'_id': result.inserted_id}))
+
+    def list_chat_messages(self, filter_dict: dict):
+        query = self.db.chat_messages.find(filter_dict).sort('created_at', 1)
+        return [self._to_dict(doc) for doc in query]
     
     # Database operations
     def find_one(self, collection: str, filter_dict: dict, user_id: str = None):

@@ -1,60 +1,32 @@
+import {
+  POSE_CONNECTIONS,
+  Pose,
+  type NormalizedLandmark,
+  type Results,
+} from '@mediapipe/pose';
+import { drawConnectors, drawLandmarks } from '@mediapipe/drawing_utils';
+import poseLandmarkLiteUrl from '@mediapipe/pose/pose_landmark_lite.tflite?url';
+import posePackedAssetsUrl from '@mediapipe/pose/pose_solution_packed_assets.data?url';
+import posePackedAssetsLoaderUrl from '@mediapipe/pose/pose_solution_packed_assets_loader.js?url';
+import poseSimdDataUrl from '@mediapipe/pose/pose_solution_simd_wasm_bin.data?url';
+import poseSimdJsUrl from '@mediapipe/pose/pose_solution_simd_wasm_bin.js?url';
+import poseSimdWasmUrl from '@mediapipe/pose/pose_solution_simd_wasm_bin.wasm?url';
+import poseWasmJsUrl from '@mediapipe/pose/pose_solution_wasm_bin.js?url';
+import poseWasmUrl from '@mediapipe/pose/pose_solution_wasm_bin.wasm?url';
+import poseWebBinaryUrl from '@mediapipe/pose/pose_web.binarypb?url';
 import type { PoseFrame } from './therapyTypes';
 
-declare global {
-  interface Window {
-    Pose?: new (options: { locateFile: (file: string) => string }) => {
-      setOptions: (options: Record<string, unknown>) => void;
-      onResults: (callback: (results: Record<string, unknown>) => void) => void;
-      send: (payload: { image: HTMLVideoElement }) => Promise<void>;
-      close?: () => void;
-    };
-    drawConnectors?: (
-      ctx: CanvasRenderingContext2D,
-      landmarks: unknown[],
-      connections: unknown[],
-      options?: Record<string, unknown>,
-    ) => void;
-    drawLandmarks?: (
-      ctx: CanvasRenderingContext2D,
-      landmarks: unknown[],
-      options?: Record<string, unknown>,
-    ) => void;
-    POSE_CONNECTIONS?: unknown[];
-  }
-}
-
-const SCRIPT_URLS = [
-  'https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js',
-  'https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js',
-];
-
-const loadScript = (src: string) => new Promise<void>((resolve, reject) => {
-  const existing = document.querySelector(`script[data-therapy-script="${src}"]`) as HTMLScriptElement | null;
-  if (existing?.dataset.loaded === 'true') {
-    resolve();
-    return;
-  }
-
-  const script = existing ?? document.createElement('script');
-  script.src = src;
-  script.async = true;
-  script.crossOrigin = 'anonymous';
-  script.dataset.therapyScript = src;
-
-  const handleLoad = () => {
-    script.dataset.loaded = 'true';
-    resolve();
-  };
-
-  const handleError = () => reject(new Error(`Failed to load pose runtime: ${src}`));
-
-  script.addEventListener('load', handleLoad, { once: true });
-  script.addEventListener('error', handleError, { once: true });
-
-  if (!existing) {
-    document.head.appendChild(script);
-  }
-});
+const POSE_ASSET_URLS: Record<string, string> = {
+  'pose_landmark_lite.tflite': poseLandmarkLiteUrl,
+  'pose_solution_packed_assets.data': posePackedAssetsUrl,
+  'pose_solution_packed_assets_loader.js': posePackedAssetsLoaderUrl,
+  'pose_solution_simd_wasm_bin.data': poseSimdDataUrl,
+  'pose_solution_simd_wasm_bin.js': poseSimdJsUrl,
+  'pose_solution_simd_wasm_bin.wasm': poseSimdWasmUrl,
+  'pose_solution_wasm_bin.js': poseWasmJsUrl,
+  'pose_solution_wasm_bin.wasm': poseWasmUrl,
+  'pose_web.binarypb': poseWebBinaryUrl,
+};
 
 const getVideoDimensions = (video: HTMLVideoElement) => ({
   width: video.videoWidth || 640,
@@ -62,55 +34,39 @@ const getVideoDimensions = (video: HTMLVideoElement) => ({
 });
 
 export class BrowserPoseDetector {
-  private pose: ReturnType<NonNullable<Window['Pose']>> | null = null;
+  private pose: Pose | null = null;
   private latestFrame: PoseFrame | null = null;
-  private latestRawLandmarks: unknown[] = [];
+  private latestRawLandmarks: NormalizedLandmark[] = [];
   private busy = false;
   private initialized = false;
   private initializationFailed = false;
-  private sendErrorCount = 0;
   private lastSendTime = 0;
   private pendingSubmit: Promise<void> | null = null;
   private consecutiveErrors = 0;
   private readonly MAX_CONSECUTIVE_ERRORS = 5;
 
   async initialize() {
-    if (this.initializationFailed) {
-      throw new Error('Pose detection initialization has failed previously. Reload the page to retry.');
+    if (this.initialized && this.pose) {
+      return;
     }
 
-    // Load scripts sequentially to avoid race conditions
-    for (const url of SCRIPT_URLS) {
-      try {
-        await loadScript(url);
-      } catch (error) {
-        console.error(`Failed to load ${url}:`, error);
-        this.initializationFailed = true;
-        throw new Error(`Failed to load pose model: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      }
-    }
-
-    if (!window.Pose) {
-      this.initializationFailed = true;
-      throw new Error('MediaPipe Pose is unavailable in this browser. Please try a modern browser like Chrome or Firefox.');
-    }
+    this.initializationFailed = false;
 
     try {
-      const pose = new window.Pose({
-        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`,
+      const pose = new Pose({
+        locateFile: (file) => POSE_ASSET_URLS[file] ?? file,
       });
 
       pose.setOptions({
-        // Use model complexity 0 (lite) for WASM stability
+        selfieMode: true,
         modelComplexity: 0,
         smoothLandmarks: true,
         enableSegmentation: false,
-        // Slightly higher thresholds for stability
-        minDetectionConfidence: 0.55,
-        minTrackingConfidence: 0.55,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5,
       });
 
-      pose.onResults((results) => {
+      pose.onResults((results: Results) => {
         try {
           const poseLandmarks = Array.isArray(results.poseLandmarks) ? results.poseLandmarks : [];
           this.latestRawLandmarks = poseLandmarks;
@@ -124,7 +80,7 @@ export class BrowserPoseDetector {
           const dimensions = image ? getVideoDimensions(image) : { width: 640, height: 480 };
 
           this.latestFrame = {
-            landmarks: poseLandmarks.map((landmark: Record<string, number>) => ({
+            landmarks: poseLandmarks.map((landmark) => ({
               x: landmark.x ?? 0,
               y: landmark.y ?? 0,
               z: landmark.z ?? 0,
@@ -133,43 +89,42 @@ export class BrowserPoseDetector {
             timestamp: performance.now(),
             ...dimensions,
           };
-          this.consecutiveErrors = 0; // Reset on success
+          this.consecutiveErrors = 0;
         } catch (callbackError) {
           console.error('Error processing pose results:', callbackError);
         }
       });
+
+      await pose.initialize();
 
       this.pose = pose;
       this.initialized = true;
       this.consecutiveErrors = 0;
     } catch (initError) {
       this.initializationFailed = true;
-      throw new Error(`Failed to initialize pose model: ${initError instanceof Error ? initError.message : 'Unknown error'}`);
+      throw new Error(
+        `Failed to initialize pose model: ${initError instanceof Error ? initError.message : 'Unknown error'}`,
+      );
     }
   }
 
   async estimate(video: HTMLVideoElement) {
-    // If initialization failed, keep returning null
     if (this.initializationFailed) {
       return null;
     }
 
-    // If not initialized yet, return cached frame
     if (!this.pose || !this.initialized) {
       return this.latestFrame;
     }
 
-    // If too many consecutive errors, stop trying temporarily
     if (this.consecutiveErrors >= this.MAX_CONSECUTIVE_ERRORS) {
       const timeSinceLastSend = performance.now() - this.lastSendTime;
-      // Wait 2 seconds before retrying after max errors
       if (timeSinceLastSend < 2000) {
         return this.latestFrame;
       }
-      this.consecutiveErrors = 0; // Reset and try again
+      this.consecutiveErrors = 0;
     }
 
-    // If previous submit is still pending, don't start another
     if (this.pendingSubmit) {
       try {
         await Promise.race([
@@ -177,14 +132,12 @@ export class BrowserPoseDetector {
           new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 100)),
         ]);
       } catch {
-        // Timeout or error, clear pending state
         this.pendingSubmit = null;
         this.busy = false;
       }
       return this.latestFrame;
     }
 
-    // Skip if already processing
     if (this.busy) {
       return this.latestFrame;
     }
@@ -193,11 +146,10 @@ export class BrowserPoseDetector {
     this.lastSendTime = performance.now();
 
     try {
-      // Add strict timeout wrapper to prevent WASM hang
       this.pendingSubmit = Promise.race([
         this.pose.send({ image: video }),
         new Promise<void>((_, reject) =>
-          setTimeout(() => reject(new Error('Pose detection timeout')), 600)
+          setTimeout(() => reject(new Error('Pose detection timeout')), 900),
         ),
       ]);
 
@@ -205,7 +157,6 @@ export class BrowserPoseDetector {
       this.pendingSubmit = null;
       return this.latestFrame;
     } catch (error) {
-      // MediaPipe send can fail if video isn't ready, WebGL context lost, or timeout
       this.consecutiveErrors += 1;
       console.debug('Pose detection error (will retry):', error instanceof Error ? error.message : error);
       this.pendingSubmit = null;
@@ -229,11 +180,11 @@ export class BrowserPoseDetector {
     if (!frame || !this.latestRawLandmarks.length) return;
 
     try {
-      window.drawConnectors?.(ctx, this.latestRawLandmarks, window.POSE_CONNECTIONS ?? [], {
+      drawConnectors(ctx, this.latestRawLandmarks, POSE_CONNECTIONS, {
         color: '#D3A15D',
         lineWidth: 3,
       });
-      window.drawLandmarks?.(ctx, this.latestRawLandmarks, {
+      drawLandmarks(ctx, this.latestRawLandmarks, {
         color: '#F7F2E8',
         fillColor: '#5D7052',
         radius: 4,
@@ -249,7 +200,7 @@ export class BrowserPoseDetector {
 
   dispose() {
     try {
-      this.pose?.close?.();
+      void this.pose?.close();
     } catch {
       // Ignore dispose errors
     }
@@ -257,9 +208,9 @@ export class BrowserPoseDetector {
     this.latestFrame = null;
     this.latestRawLandmarks = [];
     this.initialized = false;
+    this.initializationFailed = false;
     this.busy = false;
     this.consecutiveErrors = 0;
     this.pendingSubmit = null;
-    // Note: intentionally NOT resetting initializationFailed so the error persists across attempts
   }
 }

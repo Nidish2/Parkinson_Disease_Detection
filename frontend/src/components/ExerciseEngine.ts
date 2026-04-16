@@ -13,7 +13,7 @@ const EXERCISES: ExerciseDefinition[] = [
     name: 'Seated Hand Raise',
     description: 'Sit tall and raise both hands above shoulder level, then lower them.',
     instructions: 'Stay seated upright. Raise both hands above your shoulders, pause briefly, then lower them. Repeat smoothly.',
-    correctiveCue: 'Lift both hands higher — try to get them clearly above your shoulders, then bring them back down.',
+    correctiveCue: 'Lift both hands higher - try to get them clearly above your shoulders, then bring them back down.',
     benefit: 'Improves shoulder mobility, upright sitting posture, and movement amplitude.',
     targetReps: 6,
     durationSeconds: 45,
@@ -50,7 +50,18 @@ const EXERCISES: ExerciseDefinition[] = [
   },
 ];
 
-type Phase = 'ready' | 'up' | 'down' | 'close' | 'far' | 'holding' | 'left-cross' | 'right-cross' | 'neutral' | 'tap-up' | 'tap-down';
+type Phase =
+  | 'ready'
+  | 'up'
+  | 'down'
+  | 'close'
+  | 'far'
+  | 'holding'
+  | 'left-cross'
+  | 'right-cross'
+  | 'neutral'
+  | 'tap-up'
+  | 'tap-down';
 
 type ExerciseSummary = {
   exerciseName: string;
@@ -99,7 +110,7 @@ export class ExerciseEngine {
     return this.sessionExercises[this.exerciseIndex] ?? null;
   }
 
-  private totalExerciseCount() {
+  totalExerciseCount() {
     return this.sessionExercises.length || EXERCISES.length;
   }
 
@@ -128,7 +139,7 @@ export class ExerciseEngine {
           stability: 'GOOD',
           complete: true,
           timerSeconds: Math.round((performance.now() - this.exerciseStartedAt) / 1000),
-          guidance: 'Session complete! Great job!',
+          guidance: 'Session complete. Great job.',
           correctiveCommand: undefined,
           postureCorrect: true,
           postureFeedback: 'Session complete.',
@@ -169,11 +180,8 @@ export class ExerciseEngine {
     const rWrist = frame.landmarks[RIGHT_WRIST];
     const lElbow = frame.landmarks[LEFT_ELBOW];
     const rElbow = frame.landmarks[RIGHT_ELBOW];
-    // We intentionally ignore hips as they are rarely visible securely when seated
 
-    // Only require shoulders + wrists + elbows (NOT hips) for detection — very lenient
-    const coreVisible = [lShoulder, rShoulder, lWrist, rWrist, lElbow, rElbow]
-      .every((p) => p && p.visibility > 0.2);
+    const coreVisible = [lShoulder, rShoulder, lWrist, rWrist, lElbow, rElbow].every((point) => point && point.visibility > 0.2);
 
     if (!coreVisible) {
       this.warmupFrames = 0;
@@ -201,28 +209,23 @@ export class ExerciseEngine {
 
     this.warmupFrames += 1;
 
-    // Posture check — very simple: are shoulders roughly level?
     const wristMidY = (lWrist.y + rWrist.y) / 2;
     const shoulderWidth = Math.max(Math.abs(lShoulder.x - rShoulder.x), 0.03);
-
-    // Posture check — very simple: are shoulders roughly level?
     const shoulderTilt = Math.abs(lShoulder.y - rShoulder.y) / shoulderWidth;
-    const postureCorrect = shoulderTilt < 0.5; // Very lenient
+    const postureCorrect = shoulderTilt < 0.5;
     const postureFeedback = postureCorrect
-      ? 'Posture correct — keep it up!'
+      ? 'Posture correct - keep it up!'
       : 'Try to level your shoulders and sit up straight.';
 
     let milestone: string | undefined;
     let adaptationNote: string | undefined;
     let correctiveCommand: string | undefined;
-    let movementFormScore = 0; // Start at 0, only award points for correct movement
+    let movementFormScore = 0;
 
     const isWarmedUp = this.warmupFrames > 15;
 
     switch (exercise.id) {
       case 'seated-hand-raise': {
-        // SIMPLE: wrists above shoulders = raised, wrists below shoulders = lowered
-        // In MediaPipe, y=0 is top, y=1 is bottom. Wrists above shoulders means wrist.y < shoulder.y
         const bothWristsAboveShoulders = lWrist.y < lShoulder.y && rWrist.y < rShoulder.y;
         const bothWristsBelowShoulders = lWrist.y > lShoulder.y + 0.03 && rWrist.y > rShoulder.y + 0.03;
 
@@ -233,55 +236,47 @@ export class ExerciseEngine {
             this.completeRep(frame.timestamp);
             this.phase = 'down';
             milestone = this.reps === exercise.targetReps
-              ? '🎉 Hand raises complete!'
+              ? 'Hand raises complete.'
               : this.reps === Math.ceil(exercise.targetReps / 2)
-                ? '⭐ Halfway through hand raises!'
+                ? 'Halfway through hand raises.'
                 : undefined;
           }
         }
 
-        // Score based on actual hand position
-        // 0 points if below shoulders, 100 points if well above
         const avgWristY = (lWrist.y + rWrist.y) / 2;
         const avgShoulderY = (lShoulder.y + rShoulder.y) / 2;
-        const heightDiff = avgShoulderY - avgWristY; // Positive = above, negative = below
+        const heightDiff = avgShoulderY - avgWristY;
 
         if (heightDiff <= 0) {
-          // Hands below or at shoulder level
           movementFormScore = 0;
         } else if (heightDiff >= 0.2) {
-          // Hands well above shoulders
           movementFormScore = 100;
         } else {
-          // Hands between shoulder and 0.2 above
-          movementFormScore = clamp(heightDiff * 500); // 0 to 100
+          movementFormScore = clamp(heightDiff * 500);
         }
 
         if (!bothWristsAboveShoulders && this.phase !== 'up' && isWarmedUp) {
-          correctiveCommand = 'Raise BOTH hands above your shoulders. Lift them high, then bring them down.';
+          correctiveCommand = 'Raise both hands above your shoulders. Lift them high, then bring them down.';
         }
         break;
       }
 
       case 'finger-tapping': {
-        // Track rapid up-down wrist motion
         if (this.prevWristMidY !== null && isWarmedUp) {
           const delta = wristMidY - this.prevWristMidY;
           const motionSize = Math.abs(delta);
 
-          if (motionSize > 0.012) { // Minimum motion threshold (increased from 0.008)
+          if (motionSize > 0.012) {
             const currentDir = delta < 0 ? 'up' : 'down';
             if (this.tapDirection !== null && currentDir !== this.tapDirection) {
-              // Direction changed — count a half-tap
               this.tapCount += 1;
               if (this.tapCount >= 2) {
-                // Two direction changes = one full tap rep
                 this.completeRep(frame.timestamp);
                 this.tapCount = 0;
                 milestone = this.reps === exercise.targetReps
-                  ? '🎉 Finger tapping complete!'
+                  ? 'Finger tapping complete.'
                   : this.reps === Math.ceil(exercise.targetReps / 2)
-                    ? '⭐ Halfway through tapping!'
+                    ? 'Halfway through tapping.'
                     : undefined;
               }
             }
@@ -290,29 +285,24 @@ export class ExerciseEngine {
         }
         this.prevWristMidY = wristMidY;
 
-        // Score based on actual tapping speed and frequency
-        // 0 points if no taps, 100 points if consistent rapid taps
         if (this.tapCount === 0) {
-          movementFormScore = 0; // Not tapping
+          movementFormScore = 0;
         } else {
-          // Each tap counts, max out at 100 when doing 5+ half-taps/reps
-          movementFormScore = clamp(this.tapCount * 20); // 0, 20, 40, 60, 80, 100
+          movementFormScore = clamp(this.tapCount * 20);
         }
 
         if (this.reps === 0 && timerSeconds > 5 && isWarmedUp) {
-          correctiveCommand = 'Move your hands up and down quickly in small tapping motions. Keep going!';
+          correctiveCommand = 'Move your hands up and down quickly in small tapping motions. Keep going.';
         }
         break;
       }
 
       case 'arm-stability': {
-        // Arms outstretched: wrists near shoulder height, arms extended sideways
         const lWristNearShoulderHeight = Math.abs(lWrist.y - lShoulder.y) < 0.12;
         const rWristNearShoulderHeight = Math.abs(rWrist.y - rShoulder.y) < 0.12;
         const armsExtended = Math.abs(lWrist.x - lShoulder.x) > 0.05 && Math.abs(rWrist.x - rShoulder.x) > 0.05;
         const armsInPosition = lWristNearShoulderHeight && rWristNearShoulderHeight && armsExtended;
 
-        // Check jitter
         let jitterScore = 0;
         if (this.lastWristSample) {
           const dt = (frame.timestamp - this.lastWristSample.t) / 1000;
@@ -336,18 +326,16 @@ export class ExerciseEngine {
             this.completeRep(frame.timestamp);
             this.holdSeconds = 0;
             milestone = this.reps === exercise.targetReps
-              ? '🎉 Arm stability complete!'
-              : `Hold ${this.reps} done! Stay steady.`;
+              ? 'Arm stability complete.'
+              : `Hold ${this.reps} done. Stay steady.`;
           }
         } else {
           this.holdSeconds = Math.max(0, this.holdSeconds - 0.15);
         }
 
-        // Score: 0 if arms not in position, up to 100 if steady
         if (!armsInPosition) {
-          movementFormScore = 0; // Cannot score without proper position
+          movementFormScore = 0;
         } else {
-          // Stability bonus: 100 if stable, 70 if slightly shaky
           movementFormScore = stable ? 100 : 70;
         }
 
@@ -358,14 +346,12 @@ export class ExerciseEngine {
             correctiveCommand = 'Extend your arms further out to the sides. Stretch them wide.';
           }
         } else if (armsInPosition && !stable) {
-          correctiveCommand = 'Good position! Now try to hold very still. Breathe slowly and relax your shoulders.';
+          correctiveCommand = 'Good position. Now try to hold very still. Breathe slowly and relax your shoulders.';
         }
         break;
       }
 
       case 'seated-march': {
-        // Arm cross touch: right hand crosses to left shoulder area, and vice versa
-        // Right hand near left shoulder: rWrist.x close to lShoulder.x AND rWrist.y close to lShoulder.y
         const rightCrossed = Math.abs(rWrist.x - lShoulder.x) < 0.12 && Math.abs(rWrist.y - lShoulder.y) < 0.15;
         const leftCrossed = Math.abs(lWrist.x - rShoulder.x) < 0.12 && Math.abs(lWrist.y - rShoulder.y) < 0.15;
         const handsAtRest = !rightCrossed && !leftCrossed;
@@ -380,22 +366,21 @@ export class ExerciseEngine {
           } else if (this.phase === 'right-cross' && handsAtRest) {
             this.completeRep(frame.timestamp);
             milestone = this.reps === exercise.targetReps
-              ? '🎉 Arm cross touch complete!'
+              ? 'Arm cross touch complete.'
               : this.reps === Math.ceil(exercise.targetReps / 2)
-                ? '⭐ Halfway done!'
+                ? 'Halfway done.'
                 : undefined;
             this.phase = 'neutral';
           } else if (this.phase === 'left-cross' && handsAtRest) {
             this.completeRep(frame.timestamp);
             milestone = this.reps === exercise.targetReps
-              ? '🎉 Arm cross touch complete!'
+              ? 'Arm cross touch complete.'
               : undefined;
             this.phase = 'neutral';
           }
         }
 
-        // Score: 0 if no crossing, 100 if crossing detected
-        movementFormScore = (rightCrossed || leftCrossed) ? 100 : 0;
+        movementFormScore = rightCrossed || leftCrossed ? 100 : 0;
 
         if (!rightCrossed && !leftCrossed && isWarmedUp && timerSeconds > 3) {
           correctiveCommand = 'Reach your right hand across to touch your left shoulder, then switch. Alternate sides.';
@@ -408,32 +393,24 @@ export class ExerciseEngine {
       correctiveCommand = postureFeedback;
     }
 
-    // Accuracy formula based ONLY on actual movement quality
-    // Movement form is 0-100 (only source of accuracy)
-    // No artificial bonuses - user must MOVE correctly to get high accuracy
     let rawAcc = clamp(movementFormScore);
     if (rawAcc === 0 && this.accuracyValues.length > 0) {
-      rawAcc = this.accuracyValues[this.accuracyValues.length - 1]; // Hold accuracy during rest phases
+      rawAcc = this.accuracyValues[this.accuracyValues.length - 1];
     }
     const accuracy = clamp(rawAcc) - (analysis.issues.tremor ? 10 : 0);
     this.accuracyValues.push(accuracy);
     this.accuracyValues = this.accuracyValues.slice(-30);
-    // Use actual average, no minimum guarantee
     const displayAccuracy = Math.round(average(this.accuracyValues.slice(-12)) || accuracy);
 
     const avgRepMs = this.repDurations.length ? average(this.repDurations) : 0;
-    const speed = avgRepMs === 0
-      ? 'NORMAL'
-      : avgRepMs > 3500 ? 'SLOW' : avgRepMs < 1000 ? 'FAST' : 'NORMAL';
+    const speed = avgRepMs === 0 ? 'NORMAL' : avgRepMs > 3500 ? 'SLOW' : avgRepMs < 1000 ? 'FAST' : 'NORMAL';
 
-    // Adapt difficulty if struggling
     if (!this.adapted && timerSeconds > Math.floor(exercise.durationSeconds * 0.6) && this.reps < 2) {
       exercise.targetReps = Math.max(3, exercise.targetReps - 2);
       this.adapted = true;
-      adaptationNote = 'I\'ve reduced the target slightly. Focus on quality over quantity!';
+      adaptationNote = 'I reduced the target slightly. Focus on quality over quantity.';
     }
 
-    // Exercise completes when reps reached OR timer expires
     const complete = this.reps >= exercise.targetReps || timerSeconds >= exercise.durationSeconds;
     if (complete) {
       this.completedExercises += 1;
@@ -469,8 +446,8 @@ export class ExerciseEngine {
           stability: analysis.issues.stability,
           complete: true,
           timerSeconds,
-          milestone: milestone ?? `✅ ${exercise.name} finished!`,
-          guidance: nextEx ? `Next: ${nextEx.name}. ${nextEx.instructions}` : 'All exercises complete! Great session!',
+          milestone: milestone ?? `${exercise.name} finished.`,
+          guidance: nextEx ? `Next: ${nextEx.name}. ${nextEx.instructions}` : 'All exercises complete. Great session.',
           correctiveCommand: undefined,
           postureCorrect,
           postureFeedback,

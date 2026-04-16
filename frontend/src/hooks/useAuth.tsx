@@ -1,21 +1,15 @@
 import React, { createContext, useState, useContext, useEffect } from 'react';
 import { mongodb } from '../lib/mongodbClient';
 import { Profile } from '../types/database';
-
-// MongoDB-compatible User and Session types
-interface User {
-  id: string;
-  email: string;
-  full_name?: string;
-}
+import type { AppUser } from '../types/healthcare';
 
 interface Session {
-  user: User;
+  user: AppUser;
   access_token: string;
 }
 
 interface AuthContextType {
-  user: User | null;
+  user: AppUser | null;
   profile: Profile | null;
   session: Session | null;
   loading: boolean;
@@ -26,7 +20,7 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<AppUser | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
@@ -37,7 +31,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         .from('patient_profiles')
         .eq('id', userId)
         .single();
-      
+
       if (error) {
         console.warn('Error fetching profile from MongoDB:', error);
         // Try localStorage fallback
@@ -72,7 +66,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   const refreshProfile = async () => {
-    if (user) {
+    if (user?.role === 'patient') {
       await fetchProfile(user.id);
     }
   }
@@ -95,17 +89,17 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         setLoading(false);
         return;
       }
-      
-      const currentUser = data?.user ?? null;
+
+      const currentUser = (data?.user as AppUser | null) ?? null;
       const sessionData = data ? {
         user: data.user,
         access_token: mongodb.getToken() || '',
       } : null;
-      
+
       setSession(sessionData as Session | null);
       setUser(currentUser);
 
-      if (currentUser) {
+      if (currentUser?.role === 'patient') {
         fetchProfile(currentUser.id).finally(() => {
           clearTimeout(timeout);
           setLoading(false);
@@ -121,15 +115,17 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     const pollInterval = setInterval(() => {
       mongodb.getSession().then(({ data, error }) => {
         if (!error && data) {
-          const currentUser = data.user;
+          const currentUser = data.user as AppUser | null;
           const sessionData = {
             user: currentUser,
             access_token: mongodb.getToken() || '',
           };
-          setSession(sessionData as Session);
+          setSession(currentUser ? sessionData as Session : null);
           setUser(currentUser);
-          if (currentUser) {
+          if (currentUser?.role === 'patient') {
             fetchProfile(currentUser.id);
+          } else {
+            setProfile(null);
           }
         } else {
           setUser(null);
@@ -157,12 +153,12 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
       // Sign out from MongoDB
       await mongodb.signOut();
-      
+
       // Clear state immediately
       setUser(null);
       setProfile(null);
       setSession(null);
-      
+
       // Redirect to login page
       window.location.href = '/login';
     } catch (error) {

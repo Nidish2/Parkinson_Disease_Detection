@@ -1,637 +1,639 @@
-import { useState, useRef, useEffect } from 'react';
-import { Mic, X, LoaderCircle, AlertCircle, Square, Scan, Play, UploadCloud, FileAudio, CheckCircle2 } from 'lucide-react';
-import { mongodb } from '../lib/mongodbClient';
+import { useEffect, useRef, useState } from 'react';
+import { X, LoaderCircle, AlertCircle, Scan, Upload, Mic, Square, RefreshCw } from 'lucide-react';
 import { insertTestRecord } from '../services/testPersistence';
 import { useAuth } from '../hooks/useAuth';
-import {
-  extractVoiceFeatures,
-  VoiceFeatureVector,
-} from '../services/voiceKnnModel';
-import { predictFromAudioBlob, AudioPredictionResponse } from '../services/voiceBackendApi';
-import { convertBlobToWav } from '../utils/wavConverter';
+import { predictVoice, type VoicePrediction } from '../services/voiceModel';
 
-type PrescriptionPlan = {
-  summary: string;
-  symptomFlags: string[];
-  recommendations: string[];
+type VoiceMode = 'record' | 'upload';
+type VoiceAnalysisMethod = 'neural';
+
+const SPEAKING_PROMPTS = [
+  'Today I am speaking clearly for this short voice screening.',
+  'My hands feel steady and my breathing is calm and even.',
+  'NeuroCare helps me track voice and movement changes over time.',
+];
+
+const getSupportedRecordingMimeType = () => {
+  if (typeof MediaRecorder === 'undefined') {
+    return '';
+  }
+
+  const mimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
+  return mimeTypes.find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) ?? '';
 };
 
-const deriveRiskLevel = (probability: number): 'High' | 'Medium' | 'Low' => {
-  if (probability >= 0.7) return 'High';
-  if (probability >= 0.4) return 'Medium';
-  return 'Low';
+const getAudioContextConstructor = () => {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  return window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext || null;
 };
 
-const describeVoiceSymptoms = (features: VoiceFeatureVector): string[] => {
-  const flags: string[] = [];
-  if (features.locPctJitter > 1.2) {
-    flags.push('Elevated jitter suggests tremor during sustained phonation.');
-  }
-  if (features.ppq5Jitter > 0.6) {
-    flags.push('Perturbation quotient shows irregular pitch periods.');
-  }
-  if (features.locShimmer > 1.5) {
-    flags.push('Increased shimmer highlights amplitude instability.');
-  }
-  if (features.apq5Shimmer > 3) {
-    flags.push('Voice amplitude variability (APQ5) exceeds healthy limits.');
-  }
-  if (features.meanNoiseToHarmHarmonicity > 0.25) {
-    flags.push('Noise-to-harmonics ratio indicates breathiness or vocal fatigue.');
-  }
-  return flags.length ? flags : ['Voice parameters remain within expected healthy ranges.'];
-};
+const encodeWav = (samples: Float32Array, sampleRate: number) => {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
 
-const generatePrescriptionPlan = (prediction: AudioPredictionResponse, features: VoiceFeatureVector): PrescriptionPlan => {
-  const riskLevel = deriveRiskLevel(prediction.probabilityOfParkinsons);
-  const symptomFlags = describeVoiceSymptoms(features);
-  const probabilityText = (prediction.probabilityOfParkinsons * 100).toFixed(1);
-  const summary = prediction.label === 'Parkinsons'
-    ? `Voice screening indicates a ${riskLevel.toLowerCase()} risk for Parkinsonian speech changes (probability ${probabilityText}%).`
-    : `Voice screening suggests low likelihood of Parkinsonian speech changes (probability ${probabilityText}%).`;
-
-  const recommendations: string[] = [
-    'Share this screening summary with your neurologist or speech therapist.',
-    riskLevel === 'High'
-      ? 'Arrange a comprehensive neurological and speech-language evaluation within 14 days.'
-      : riskLevel === 'Medium'
-        ? 'Book a clinical follow-up within the next month to confirm findings.'
-        : 'Repeat the voice screening monthly to monitor any emerging changes.',
-    'Practice daily vocal warm-up and breath support exercises for at least 10 minutes.',
-  ];
-
-  if (riskLevel !== 'Low') {
-    recommendations.push('Keep a brief symptom journal (voice fatigue, tremors, medication changes) to review with your care team.');
-  }
-
-  return { summary, symptomFlags, recommendations };
-};
-
-
-
-const VoiceCaptureModal = ({ onClose }: { onClose: () => void }) => {
-  const [recordingStatus, setRecordingStatus] = useState<'idle' | 'recording' | 'recorded'>('idle');
-  const [activeTab, setActiveTab] = useState<'live' | 'upload'>('live');
-  const [isHoveringDrop, setIsHoveringDrop] = useState(false);
-  const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
-  const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
-  const [audioUrl, setAudioUrl] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [prediction, setPrediction] = useState<AudioPredictionResponse | null>(null);
-  const [analyzing, setAnalyzing] = useState(false);
-  const [modelError, setModelError] = useState<string | null>(null);
-  const [modelLoading, setModelLoading] = useState(true);
-  const [savingResult, setSavingResult] = useState(false);
-  const [saveMessage, setSaveMessage] = useState<string | null>(null);
-  const [savedTestId, setSavedTestId] = useState<string | null>(null);
-  const [recordingDuration, setRecordingDuration] = useState(0);
-  const [recordingPrompt, setRecordingPrompt] = useState<string>('');
-  const [isPlayingTTS, setIsPlayingTTS] = useState(false);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
-  const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const autoStopTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const { user } = useAuth();
-
-  // Static prompt used directly, removed RECORDING_PROMPTS for cleaner code.
-  const RECORDING_DURATION_SECONDS = 30;
-  const MIN_RECORDING_DURATION_SECONDS = 3;
-
-  useEffect(() => {
-    let cancelled = false;
-    setModelLoading(true);
-    
-    // Simulate model readiness check or fetch from backend
-    setTimeout(() => {
-      if (cancelled) return;
-      setModelError(null);
-      setModelLoading(false);
-    }, 1000);
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const startRecording = async () => {
-    try {
-      if ('speechSynthesis' in window) {
-        window.speechSynthesis.cancel();
-        setIsPlayingTTS(false);
-      }
-      setPrediction(null);
-      setSaveMessage(null);
-      setSavedTestId(null);
-      setError(null);
-      setRecordingDuration(0);
-
-      // The prompt is now static in the UI, so no random text or TTS on record start.
-      setRecordingPrompt("The North Wind and the Sun were disputing which was the stronger, when a traveler came along wrapped in a warm cloak. They agreed that the one who first succeeded in making the traveler take his cloak off should be considered stronger than the other.");
-
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      setRecordingStatus('recording');
-      mediaRecorderRef.current = new MediaRecorder(stream);
-      mediaRecorderRef.current.ondataavailable = (event) => {
-        audioChunksRef.current.push(event.data);
-      };
-      mediaRecorderRef.current.onstop = async () => {
-        const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        setAudioBlob(blob);
-        setAudioUrl(URL.createObjectURL(blob));
-        audioChunksRef.current = [];
-        setRecordingStatus('recorded');
-        stream.getTracks().forEach(track => track.stop()); // Stop mic access
-
-        // Clear timers
-        if (recordingTimerRef.current) {
-          clearInterval(recordingTimerRef.current);
-          recordingTimerRef.current = null;
-        }
-        if (autoStopTimerRef.current) {
-          clearTimeout(autoStopTimerRef.current);
-          autoStopTimerRef.current = null;
-        }
-
-        // Automatically trigger KNN analysis after recording
-        setTimeout(() => {
-          if (!modelError && blob) {
-            // Trigger analysis with the new blob
-            setAudioBlob(blob);
-            triggerAnalysis(blob);
-          }
-        }, 500);
-      };
-      mediaRecorderRef.current.start();
-
-      // Start duration counter
-      recordingTimerRef.current = setInterval(() => {
-        setRecordingDuration((prev) => prev + 1);
-      }, 1000);
-
-      // Auto-stop after max duration
-      autoStopTimerRef.current = setTimeout(() => {
-        stopRecording();
-      }, RECORDING_DURATION_SECONDS * 1000);
-    } catch (err) {
-      setError('Microphone access was denied. Please enable it in your browser settings.');
-      console.error("Error accessing microphone:", err);
+  const writeString = (offset: number, value: string) => {
+    for (let index = 0; index < value.length; index += 1) {
+      view.setUint8(offset + index, value.charCodeAt(index));
     }
   };
 
-  const persistScreeningResult = async (
-    features: VoiceFeatureVector,
-    result: AudioPredictionResponse,
-    plan: PrescriptionPlan,
-  ) => {
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, samples.length * 2, true);
+
+  let offset = 44;
+  for (let index = 0; index < samples.length; index += 1) {
+    const sample = Math.max(-1, Math.min(1, samples[index]));
+    view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+    offset += 2;
+  }
+
+  return new Blob([buffer], { type: 'audio/wav' });
+};
+
+const convertRecordedBlobToWav = async (blob: Blob) => {
+  const AudioContextConstructor = getAudioContextConstructor();
+  if (!AudioContextConstructor) {
+    throw new Error('This browser cannot convert the recorded audio to WAV.');
+  }
+
+  const audioContext = new AudioContextConstructor();
+  try {
+    const audioBuffer = await audioContext.decodeAudioData(await blob.arrayBuffer());
+    const mixedSamples = new Float32Array(audioBuffer.length);
+
+    for (let channelIndex = 0; channelIndex < audioBuffer.numberOfChannels; channelIndex += 1) {
+      const channelData = audioBuffer.getChannelData(channelIndex);
+      for (let sampleIndex = 0; sampleIndex < audioBuffer.length; sampleIndex += 1) {
+        mixedSamples[sampleIndex] += channelData[sampleIndex] / audioBuffer.numberOfChannels;
+      }
+    }
+
+    return encodeWav(mixedSamples, audioBuffer.sampleRate);
+  } finally {
+    await audioContext.close();
+  }
+};
+
+const getVoiceResultTone = (prediction: VoicePrediction) => {
+  const parkinsonsPercent = prediction.probabilities.Parkinsons * 100;
+  const healthyPercent = prediction.probabilities.Healthy * 100;
+  const threshold = prediction.assessment?.threshold ?? 0.65;
+  const borderlineFloor = threshold - (prediction.assessment?.borderlineMargin ?? 0.12);
+  const status =
+    prediction.assessment?.status ??
+    (prediction.probabilities.Parkinsons >= threshold
+      ? 'high_risk'
+      : prediction.probabilities.Parkinsons >= borderlineFloor
+        ? 'borderline'
+        : 'healthy_range');
+
+  if (status === 'high_risk') {
+    return {
+      title: 'Follow-up recommended',
+      summary: `This sample showed Parkinsonian speech markers with ${parkinsonsPercent.toFixed(1)}% probability.`,
+      badge: 'Needs attention',
+      accentPanel: 'border-secondary/30 bg-secondary/10',
+      accentIcon: 'bg-secondary/15 text-secondary',
+      accentBadge: 'border-secondary/25 bg-secondary/15 text-secondary',
+      primaryMetric: 'text-secondary',
+      riskBar: 'from-secondary/60 to-secondary',
+      healthyBar: 'from-primary/40 to-primary/70',
+    };
+  }
+
+  if (status === 'borderline') {
+    return {
+      title: 'Borderline result',
+      summary: `This sample is near the clinical decision threshold (${threshold.toFixed(2)}). Please re-record in a quiet room for a clearer result.`,
+      badge: 'Retake suggested',
+      accentPanel: 'border-amber-400/30 bg-amber-400/10',
+      accentIcon: 'bg-amber-400/15 text-amber-300',
+      accentBadge: 'border-amber-400/25 bg-amber-400/15 text-amber-300',
+      primaryMetric: 'text-amber-300',
+      riskBar: 'from-amber-300 to-secondary',
+      healthyBar: 'from-primary/40 to-primary/70',
+    };
+  }
+
+  return {
+    title: 'Within healthy range',
+    summary: `This sample stayed closer to healthy voice patterns with ${healthyPercent.toFixed(1)}% healthy probability.`,
+    badge: 'Stable screening',
+    accentPanel: 'border-primary/25 bg-primary/10',
+    accentIcon: 'bg-primary/15 text-primary',
+    accentBadge: 'border-primary/20 bg-primary/10 text-primary',
+    primaryMetric: 'text-primary',
+    riskBar: 'from-secondary/45 to-secondary/75',
+    healthyBar: 'from-primary/50 to-primary',
+  };
+};
+
+const VoiceCaptureModal = ({ onClose }: { onClose: () => void }) => {
+  const [mode, setMode] = useState<VoiceMode>('record');
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [prediction, setPrediction] = useState<VoicePrediction | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [analysisStep, setAnalysisStep] = useState<string>('');
+  const [savingResult, setSavingResult] = useState(false);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [activePromptIndex, setActivePromptIndex] = useState(0);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null);
+  const [predictionSource, setPredictionSource] = useState<VoiceMode>('record');
+  const { user } = useAuth();
+
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordingChunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
+  const timerRef = useRef<number | null>(null);
+  const recordingSecondsRef = useRef(0);
+
+  useEffect(() => {
+    return () => {
+      stopRecordingStream();
+      clearRecordingTimer();
+    };
+  }, []);
+
+  const clearRecordingTimer = () => {
+    if (timerRef.current !== null) {
+      window.clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+  };
+
+  const stopRecordingStream = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+  };
+
+  const resetFlow = (nextMode?: VoiceMode) => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    setPrediction(null);
+    setAnalysisError(null);
+    setAnalysisStep('');
+    setSaveMessage(null);
+    setUploadFile(null);
+    setRecordedBlob(null);
+    setRecordingSeconds(0);
+    recordingSecondsRef.current = 0;
+    setIsRecording(false);
+    if (nextMode) {
+      setMode(nextMode);
+    }
+  };
+
+  const saveVoiceResult = async (result: VoicePrediction, method: VoiceAnalysisMethod, sourceMode: VoiceMode) => {
     if (!user) {
-      setSaveMessage('Sign in to save results to your dashboard.');
+      setSaveMessage('Sign in to save results.');
       return;
     }
+
     setSavingResult(true);
-    setSaveMessage(null);
-    const riskScore = Number((result.probabilityOfParkinsons * 10).toFixed(1));
-    const riskLevel = deriveRiskLevel(result.probabilityOfParkinsons);
-    const resultPayload = {
-      label: result.label,
-      probability: result.probabilityOfParkinsons,
-      riskScore,
-      riskLevel,
-      features,
-      prescription: plan,
-      createdAt: new Date().toISOString(),
-      source: 'voice-screening-cloud',
-      modelInfo: result.modelInfo,
-    };
-
     try {
-      let mongodbSuccess = false;
-      let mongoRecordId: string | null = savedTestId;
-      if (savedTestId) {
-        const { error: updateError } = await mongodb
-          .from('tests')
-          .update({
-            id: savedTestId,
-            result: resultPayload,
-            confidence: result.probabilityOfParkinsons,
-            model_versions: {
-              voiceCnn: result.modelInfo?.name || 'Deep Voice CNN',
-              dataset: result.modelInfo?.dataset || 'MDVR-KCL',
-            },
-          });
-        if (!updateError) mongodbSuccess = true;
-      } else {
-        const { id, error: insertError } = await insertTestRecord({
-          patient_id: user.id,
-          test_type: 'speech',
-          raw_storage_path: null,
-          status: 'completed',
-          result: resultPayload,
-          confidence: result.probabilityOfParkinsons,
-          model_versions: {
-            voiceCnn: result.modelInfo?.name || 'Deep Voice CNN',
-            dataset: result.modelInfo?.dataset || 'MDVR-KCL',
-          },
-        });
-        if (id) {
-          mongoRecordId = id;
-          setSavedTestId(id);
-          mongodbSuccess = true;
-        } else {
-          console.warn('Speech test Mongo insert failed:', insertError);
-        }
-      }
+      const probability = result.probabilities.Parkinsons;
+      const riskScore = Number((probability * 10).toFixed(1));
 
-      // ALWAYS Save to localStorage under `local_tests` for resilience and immediate availability
+      const resultPayload = {
+        label: result.label,
+        confidence: result.confidence,
+        probability,
+        riskScore,
+        reasoning: result.reasoning,
+        probabilities: result.probabilities,
+        createdAt: new Date().toISOString(),
+        source: sourceMode === 'record' ? 'voice-screening-live' : 'voice-screening-upload',
+        modelType: method,
+        modelName: result.modelInfo.name,
+      };
+
+      const { id } = await insertTestRecord({
+        patient_id: user.id,
+        test_type: 'speech',
+        raw_storage_path: null,
+        status: 'completed',
+        result: resultPayload,
+        confidence: probability,
+        model_versions: {
+          voiceNeural: result.modelInfo.name,
+        },
+      });
+
       const localKey = 'local_tests';
       const existing = localStorage.getItem(localKey);
-      let arr: any[] = [];
-      if (existing) {
-        try { arr = JSON.parse(existing); } catch { arr = []; }
-      }
-      const localId = mongodbSuccess && mongoRecordId ? mongoRecordId : `local-${Date.now()}`;
+      const records: Record<string, unknown>[] = existing ? JSON.parse(existing) : [];
       const testRecord = {
-        id: localId,
-        patient_id: user?.id || 'local',
+        id: id || `local-${Date.now()}`,
+        patient_id: user.id,
         test_type: 'speech',
         raw_storage_path: null,
         status: 'completed',
         created_at: new Date().toISOString(),
         result: resultPayload,
-        confidence: result.probabilityOfParkinsons,
+        confidence: probability,
         model_versions: {
-          voiceCnn: result.modelInfo?.name || 'Deep Voice CNN',
-          dataset: result.modelInfo?.dataset || 'MDVR-KCL',
+          voiceNeural: result.modelInfo.name,
         },
       };
-      arr.unshift(testRecord);
-      localStorage.setItem(localKey, JSON.stringify(arr));
 
-      if (mongodbSuccess) {
-        setSaveMessage('Screening saved to dashboard.');
-      } else {
-        setSavedTestId(localId);
-        setSaveMessage('Screening saved locally (offline mode).');
-      }
-    } catch (dbError) {
-      // Fallback: Save to localStorage on error under `local_tests` so History/Dashboard pick it up
-      const localKey = 'local_tests';
-      const existing = localStorage.getItem(localKey);
-      let arr: any[] = [];
-      if (existing) {
-        try { arr = JSON.parse(existing); } catch { arr = []; }
-      }
-      const localId = `local-${Date.now()}`;
-      const testRecord = {
-        id: localId,
-        patient_id: user?.id || 'local',
-        test_type: 'speech',
-        raw_storage_path: null,
-        status: 'completed',
-        created_at: new Date().toISOString(),
-        result: resultPayload,
-        confidence: result.probabilityOfParkinsons,
-        model_versions: {
-          voiceCnn: result.modelInfo?.name || 'Deep Voice CNN',
-          dataset: result.modelInfo?.dataset || 'MDVR-KCL',
-        },
-      };
-      arr.unshift(testRecord);
-      localStorage.setItem(localKey, JSON.stringify(arr));
-      setSavedTestId(localId);
-      setSaveMessage('Screening saved locally (offline mode).');
-      setError(dbError instanceof Error ? dbError.message : 'Failed to save screening result to MongoDB.');
-      console.error('Failed to persist voice screening result:', dbError);
+      records.unshift(testRecord);
+      localStorage.setItem(localKey, JSON.stringify(records));
+      setSaveMessage(id ? 'Saved to dashboard' : 'Saved locally');
+    } catch (error) {
+      console.error('Save error:', error);
+      setSaveMessage('Saved locally (offline)');
     } finally {
       setSavingResult(false);
     }
   };
 
+  const runPrediction = async (audioBlob: Blob, sourceMode: VoiceMode) => {
+    setAnalyzing(true);
+    setAnalysisError(null);
+    setAnalysisStep('');
+    setSaveMessage(null);
+    setPrediction(null);
+    setPredictionSource(sourceMode);
+
+    try {
+      setAnalysisStep(sourceMode === 'record' ? 'Preparing recorded sample...' : 'Loading audio file...');
+      const blob =
+        sourceMode === 'record'
+          ? await convertRecordedBlobToWav(audioBlob)
+          : new Blob([await audioBlob.arrayBuffer()], { type: audioBlob.type || 'audio/webm' });
+      setAnalysisStep('Analyzing with voice model...');
+      const result = await predictVoice(blob);
+
+      setAnalysisStep('Saving to database...');
+      setPrediction(result);
+      await saveVoiceResult(result, 'neural', sourceMode);
+      setAnalysisStep('Analysis complete!');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to analyze voice sample';
+      setAnalysisError(message);
+      setPrediction(null);
+      console.error('Voice analysis error:', error);
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setUploadFile(file);
+      setRecordedBlob(null);
+      setAnalysisError(null);
+      setTimeout(() => {
+        void runPrediction(file, 'upload');
+      }, 300);
+    }
+  };
+
+  const startRecording = async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setAnalysisError('Microphone recording is not supported in this browser.');
+      return;
+    }
+
+    try {
+      resetFlow();
+      stopRecordingStream();
+      clearRecordingTimer();
+      recordingChunksRef.current = [];
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+
+      const mimeType = getSupportedRecordingMimeType();
+      const mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      setRecordingSeconds(0);
+      recordingSecondsRef.current = 0;
+      setIsRecording(true);
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          recordingChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = () => {
+        clearRecordingTimer();
+        setIsRecording(false);
+        stopRecordingStream();
+
+        const blob = new Blob(recordingChunksRef.current, {
+          type: mimeType || recordingChunksRef.current[0]?.type || 'audio/webm',
+        });
+        recordingChunksRef.current = [];
+        setRecordedBlob(blob);
+
+        if (recordingSecondsRef.current < 3) {
+          setAnalysisError('Please speak for at least 3 seconds so the sample is stable enough to analyze.');
+          return;
+        }
+
+        void runPrediction(blob, 'record');
+      };
+
+      mediaRecorder.start();
+      timerRef.current = window.setInterval(() => {
+        recordingSecondsRef.current += 1;
+        setRecordingSeconds(recordingSecondsRef.current);
+      }, 1000);
+    } catch (error) {
+      stopRecordingStream();
+      clearRecordingTimer();
+      setIsRecording(false);
+      setAnalysisError('Microphone access was denied. Please allow microphone permission and try again.');
+      console.error('Recording error:', error);
+    }
+  };
+
   const stopRecording = () => {
-    if (mediaRecorderRef.current && recordingStatus === 'recording') {
-      // Check minimum duration
-      if (recordingDuration < MIN_RECORDING_DURATION_SECONDS) {
-        setError(`Please record for at least ${MIN_RECORDING_DURATION_SECONDS} seconds.`);
-        return;
-      }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
     }
   };
 
-
-  const handleFileUpload = async (file: File) => {
-    if (!file) return;
-    setUploadedFileName(file.name);
-    setAudioBlob(file);
-    setAudioUrl(URL.createObjectURL(file));
-    setRecordingStatus('recorded');
-    
-    // Trigger analysis immediately
-    setTimeout(() => {
-      triggerAnalysis(file, file.name);
-    }, 300);
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsHoveringDrop(false);
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      handleFileUpload(e.dataTransfer.files[0]);
-    }
-  };
-
-  const triggerAnalysis = async (blob: Blob, customFileName?: string) => {
-    if (!blob || modelError) return;
-    setAnalyzing(true);
-    setSaveMessage(null);
-    try {
-      // Decode WebM/MP4 locally in browser and strictly send PCM WAV
-      const wavBlob = await convertBlobToWav(blob);
-      
-      const features = await extractVoiceFeatures(wavBlob);
-      const result = await predictFromAudioBlob(wavBlob, mongodb.getToken(), customFileName || 'recording.wav');
-      const plan = generatePrescriptionPlan(result, features);
-      
-      setPrediction(result);
-      await persistScreeningResult(features, result, plan);
-    } catch (analysisFailure) {
-      const message = analysisFailure instanceof Error
-        ? analysisFailure.message
-        : 'Unable to analyse the voice recording locally.';
-      setError(message);
-      setPrediction(null);
-      console.error('Voice analysis failed:', analysisFailure);
-    } finally {
-      setAnalyzing(false);
-    }
-  };
-
-  const handleAnalyze = async () => {
-    if (!audioBlob || modelError) return;
-    setAnalyzing(true);
-    setSaveMessage(null);
-    try {
-      const wavBlob = await convertBlobToWav(audioBlob);
-      
-      const features = await extractVoiceFeatures(wavBlob);
-      const result = await predictFromAudioBlob(wavBlob, mongodb.getToken(), uploadedFileName || 'upload.wav');
-      const plan = generatePrescriptionPlan(result, features);
-      
-      setPrediction(result);
-      await persistScreeningResult(features, result, plan);
-    } catch (analysisFailure) {
-      const message = analysisFailure instanceof Error
-        ? analysisFailure.message
-        : 'Unable to analyse the voice recording locally.';
-      setError(message);
-      setPrediction(null);
-      console.error('Voice analysis failed:', analysisFailure);
-    } finally {
-      setAnalyzing(false);
-    }
-  };
-  
-  useEffect(() => {
-    return () => {
-      if (audioUrl) URL.revokeObjectURL(audioUrl);
-    };
-  }, [audioUrl]);
+  const resultTone = prediction ? getVoiceResultTone(prediction) : null;
+  const activePrompt = SPEAKING_PROMPTS[activePromptIndex];
 
   return (
-    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50">
-      <div className="w-full max-w-lg bg-[#e8e9e1] dark:bg-[#1a1c23] rounded-[2rem] shadow-2xl m-4 relative flex flex-col p-8">
-        <div className="flex justify-between items-center mb-6">
-          <h3 className="text-2xl font-bold font-serif text-blue-800 dark:text-blue-400">Voice Screening</h3>
-          <button onClick={onClose} className="text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 transition-colors">
-            <X size={24} />
-          </button>
-        </div>
-        <div className="space-y-4 text-center">
-          {recordingStatus === 'idle' && (
-            <div className="space-y-6">
-              <div className="flex justify-center border-b border-border/40 pb-2 mb-6">
-                <div className="flex space-x-8">
-                  <button 
-                    onClick={() => setActiveTab('live')}
-                    className={`flex items-center space-x-2 pb-2 px-1 border-b-2 transition-colors ${activeTab === 'live' ? 'border-blue-500 text-blue-500 font-semibold' : 'border-transparent text-muted-foreground hover:text-foreground'}`}
-                  >
-                    <Mic size={18} />
-                    <span>Live Recording</span>
-                  </button>
-                  <button 
-                    onClick={() => setActiveTab('upload')}
-                    className={`flex items-center space-x-2 pb-2 px-1 border-b-2 transition-colors ${activeTab === 'upload' ? 'border-blue-500 text-blue-500 font-semibold' : 'border-transparent text-muted-foreground hover:text-foreground'}`}
-                  >
-                    <UploadCloud size={18} />
-                    <span>Upload Audio</span>
-                  </button>
-                </div>
-              </div>
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-foreground/20 px-4 py-6 backdrop-blur-sm">
+      <div className="flex min-h-full items-start justify-center md:items-center">
+        <div className="relative flex w-full max-w-2xl flex-col overflow-hidden rounded-[2rem] border border-border/70 bg-background/95 shadow-[0_30px_90px_rgba(44,44,36,0.18)] backdrop-blur-xl">
+          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(193,140,93,0.12),_transparent_42%),radial-gradient(circle_at_bottom_right,_rgba(93,112,82,0.12),_transparent_36%)]" />
 
-              {activeTab === 'live' && (
-                  <div className="text-left">
-                  <div className="flex items-center space-x-2 text-blue-800 dark:text-blue-400 mb-3 font-semibold">
-                    <Scan size={20} />
-                    <h4>Reading Passage</h4>
-                  </div>
-                  <div className="text-gray-700 dark:text-gray-300 text-[15px] leading-relaxed mb-4 pl-1">
-                    "The North Wind and the Sun were disputing which was the stronger, when a traveler came along wrapped in a warm cloak. They agreed that the one who first succeeded in making the traveler take his cloak off should be considered stronger than the other."
-                  </div>
-                  <button 
-                    onClick={() => {
-                      if ('speechSynthesis' in window) {
-                        if (isPlayingTTS) {
-                          window.speechSynthesis.cancel();
-                          setIsPlayingTTS(false);
-                        } else {
-                          const utterance = new SpeechSynthesisUtterance("The North Wind and the Sun were disputing which was the stronger, when a traveler came along wrapped in a warm cloak. They agreed that the one who first succeeded in making the traveler take his cloak off should be considered stronger than the other.");
-                          utterance.onend = () => setIsPlayingTTS(false);
-                          window.speechSynthesis.speak(utterance);
-                          setIsPlayingTTS(true);
-                        }
-                      }
-                    }}
-                    className="flex items-center space-x-1.5 text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 text-sm font-medium transition-colors mb-8 pl-1"
-                  >
-                    {isPlayingTTS ? <Square size={16} /> : <Play size={16} />}
-                    <span>{isPlayingTTS ? "Stop Playing" : "Listen to Passage (Optional)"}</span>
-                  </button>
-
-                  <div className="text-center px-4">
-                    <p className="text-gray-600 dark:text-gray-400 text-sm mb-6">
-                      When you're ready, click start and read the passage above in your normal voice. We will record for up to <strong className="text-blue-600 dark:text-blue-400">30 seconds</strong> for model analysis.
-                    </p>
-                    <button 
-                      onClick={startRecording} 
-                      className="w-full flex items-center justify-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 rounded-xl transition-all shadow-md hover:shadow-lg"
-                    >
-                      <Mic size={20} />
-                      <span className="text-lg">Start Recording</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {activeTab === 'upload' && (
-                <div className="text-center px-4 py-2">
-                  <p className="text-gray-600 dark:text-gray-400 mb-8 text-sm">
-                    Already have a high-quality voice recording? Upload it directly here for the most accurate clinical analysis.
-                  </p>
-                  <div 
-                    className={`border-2 border-dashed rounded-xl py-12 px-6 transition-all cursor-pointer flex flex-col items-center justify-center ${isHoveringDrop ? 'border-blue-400 bg-blue-50 dark:bg-blue-900/10' : 'border-gray-300 dark:border-gray-700 hover:border-blue-400/50 hover:bg-gray-50/30 dark:hover:bg-gray-800/30'}`}
-                    onDragOver={(e) => { e.preventDefault(); setIsHoveringDrop(true); }}
-                    onDragLeave={() => setIsHoveringDrop(false)}
-                    onDrop={handleDrop}
-                    onClick={() => document.getElementById('audio-upload')?.click()}
-                  >
-                    <input 
-                      type="file" 
-                      id="audio-upload" 
-                      accept="audio/*,.webm,.m4a,.wav,.mp3" 
-                      className="hidden" 
-                      onChange={(e) => {
-                        if (e.target.files && e.target.files.length > 0) handleFileUpload(e.target.files[0]);
-                      }}
-                    />
-                    <FileAudio size={48} className="text-blue-600/80 dark:text-blue-400 mb-4" />
-                    <h4 className="text-lg font-bold font-serif text-blue-800 dark:text-blue-400 mb-2">Click to Upload Audio File</h4>
-                    <p className="text-blue-600/60 dark:text-blue-400/60 text-sm">WAV, MP3, M4A, or WEBM support</p>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-          {recordingStatus === 'recording' && (
-            <div className="flex flex-col items-center justify-center space-y-6 py-4">
-              <div className="bg-blue-50 dark:bg-blue-900/10 border border-blue-100 dark:border-blue-800 rounded-xl p-6 w-full max-w-sm text-center">
-                <p className="text-sm font-semibold text-blue-400 mb-3 uppercase tracking-wider">Recording Prompt:</p>
-                <p className="text-blue-700 dark:text-blue-300 text-sm leading-relaxed font-medium">
-                  {recordingPrompt}
-                </p>
-              </div>
-              
-              <div className="flex items-baseline space-x-2">
-                <span className="text-3xl font-mono text-red-500 font-semibold animate-pulse tracking-wider">
-                  {Math.floor(recordingDuration / 60)}:{String(recordingDuration % 60).padStart(2, '0')}
-                </span>
-                <span className="text-muted-foreground text-sm font-medium">
-                  / {RECORDING_DURATION_SECONDS}s max
-                </span>
-              </div>
-              
-              <p className="text-muted-foreground text-sm">
-                Recording in progress... Press stop when done (min {MIN_RECORDING_DURATION_SECONDS}s).
+          <div className="relative flex items-start justify-between gap-4 border-b border-border/70 bg-background/90 px-6 py-5">
+            <div className="space-y-1">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-primary">Voice Screening</p>
+              <h3 className="text-2xl font-bold text-foreground">Capture or upload voice</h3>
+              <p className="max-w-lg text-sm text-muted-foreground">
+                Record a short spoken sample or upload an audio file. Both use the same compact result view.
               </p>
-              
-              <button 
-                onClick={stopRecording} 
-                className="flex items-center justify-center w-24 h-24 rounded-full bg-[#8FAD7D] hover:bg-[#7e996e] text-white shadow-lg transition-transform hover:scale-105"
-              >
-                <Square size={32} className="fill-transparent stroke-2" />
-              </button>
             </div>
-          )}
-            {recordingStatus === 'recorded' && (
-              <div className="space-y-6 text-center py-4">
-                <p className="text-blue-500/80 dark:text-blue-400 font-medium text-[15px]">
-                  {analyzing ? 'Audio successfully captured.' : 'Audio captured. Analysis complete.'}
-                </p>
-                
-                <div className="w-full max-w-sm mx-auto">
-                  <audio src={audioUrl!} controls className="w-full" />
+            <button
+              onClick={onClose}
+              className="rounded-full border border-border/70 bg-background/80 p-2 text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <X size={18} />
+            </button>
+          </div>
+
+          <div className="relative max-h-[calc(88vh-92px)] overflow-y-auto px-6 py-6 md:px-7">
+            {!prediction ? (
+              <div className="space-y-5">
+                <div className="inline-flex rounded-full border border-border bg-muted/60 p-1">
+                  <button
+                    onClick={() => resetFlow('record')}
+                    className={`rounded-full px-4 py-2 text-sm font-semibold transition-colors ${
+                      mode === 'record' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground'
+                    }`}
+                  >
+                    Record
+                  </button>
+                  <button
+                    onClick={() => resetFlow('upload')}
+                    className={`rounded-full px-4 py-2 text-sm font-semibold transition-colors ${
+                      mode === 'upload' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground'
+                    }`}
+                  >
+                    Upload
+                  </button>
                 </div>
-                
-                {analyzing ? (
-                  <div className="flex flex-col items-center justify-center space-y-4 pt-8 pb-4">
-                    <LoaderCircle className="animate-spin text-blue-500" size={48} />
-                    <h4 className="text-xl font-semibold text-blue-600 dark:text-blue-400 mt-4">Processing Audio with MobileNetV2...</h4>
-                    <p className="text-blue-400/80 text-sm">Extracting Mel Spectrograms & running clinical inference</p>
-                  </div>
-                ) : prediction ? (
-                  <div className="flex flex-col items-center justify-center space-y-6 animate-in fade-in zoom-in duration-300">
-                    <button
-                      onClick={() => {
-                        setRecordingStatus('idle');
-                        setAudioBlob(null);
-                        setAudioUrl(null);
-                        setPrediction(null);
-                      }}
-                      className="text-blue-600 hover:text-blue-700 font-semibold text-[15px] pt-2 pb-4"
-                    >
-                      Test Another Sample
-                    </button>
-                    
-                    <div className="w-full max-w-sm flex flex-col items-center space-y-6">
-                      <div className="text-center">
-                        <p className="text-[#a51c30] font-bold text-sm uppercase tracking-[0.15em] mb-2 font-serif">Clinical Model Result</p>
-                        <h2 className={`text-4xl font-extrabold font-serif tracking-tight ${prediction.label === 'Parkinsons' ? 'text-[#ff4e4e]' : 'text-[#1db373]'}`}>
-                          {prediction.label === 'Parkinsons' ? "Parkinson's Detected" : "Healthy Voice Detected"}
-                        </h2>
-                      </div>
-                      
-                      <div className="text-center">
-                        <p className="text-blue-800/60 dark:text-blue-400/60 font-semibold text-xs uppercase tracking-[0.1em] mb-1">Model Confidence Score</p>
-                        <p className={`text-7xl font-black ${prediction.label === 'Parkinsons' ? 'text-[#ff4e4e]' : 'text-[#1db373]'}`}>
-                          {((prediction.label === 'Healthy' ? (1 - prediction.probabilityOfParkinsons) : prediction.probabilityOfParkinsons) * 100).toFixed(1)}<span className="text-3xl font-bold ml-1">%</span>
-                        </p>
-                      </div>
-                      
-                      <p className="text-blue-900/80 dark:text-blue-200/60 text-[15px] leading-relaxed max-w-xs mx-auto text-center font-medium">
-                        {prediction.label === 'Parkinsons' 
-                          ? "The model detected mel spectrogram acoustic patterns highly consistent with Parkinsonian dysarthria or vocal tremor."
-                          : "The model found no distinct acoustic patterns consistent with Parkinson's. Voice parameters are largely within healthy ranges."}
-                      </p>
-                      
-                      <div className="pt-2 w-full space-y-8 flex flex-col items-center">
-                        {savingResult ? (
-                           <p className="text-sm text-gray-500 dark:text-gray-400 flex items-center justify-center font-medium">
-                             <LoaderCircle className="animate-spin h-4 w-4 mr-2" /> Saving to dashboard...
-                           </p>
-                        ) : saveMessage ? (
-                           <p className="text-[#1db373] dark:text-[#2dd486] text-sm font-semibold">{saveMessage}</p>
-                        ) : (
-                           <p className="text-[#1db373] dark:text-[#2dd486] text-sm font-semibold">Screening saved to dashboard.</p>
-                        )}
-                        
+
+                {mode === 'record' ? (
+                  <div className="space-y-4">
+                    <div className="rounded-[1.75rem] border border-border bg-muted/45 p-5">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-primary">Read aloud</p>
+                          <p className="mt-2 max-w-xl text-lg font-semibold leading-relaxed text-foreground">
+                            &ldquo;{activePrompt}&rdquo;
+                          </p>
+                        </div>
                         <button
-                          onClick={onClose}
-                          className="w-full bg-[#1e293b] dark:bg-[#0f172a] hover:bg-[#0f172a] dark:hover:bg-[#1e293b] text-white font-bold py-4 rounded-xl shadow-md transition-all ease-in-out"
+                          onClick={() => setActivePromptIndex((current) => (current + 1) % SPEAKING_PROMPTS.length)}
+                          className="inline-flex items-center gap-2 rounded-full border border-border bg-background/80 px-3 py-2 text-xs font-semibold text-foreground transition-colors hover:bg-background"
                         >
-                          Return to Dashboard
+                          <RefreshCw size={14} />
+                          Next sentence
                         </button>
+                      </div>
+                      <p className="mt-3 text-xs text-muted-foreground">
+                        Speak naturally for 4 to 8 seconds, then stop to predict.
+                      </p>
+                    </div>
+
+                    <div className="rounded-[1.75rem] border border-dashed border-border bg-background/60 p-8 text-center">
+                      <div className={`mx-auto mb-4 flex h-20 w-20 items-center justify-center rounded-full ${isRecording ? 'bg-secondary/15 text-secondary' : 'bg-primary/10 text-primary'}`}>
+                        {isRecording ? <Square className="h-8 w-8" /> : <Mic className="h-8 w-8" />}
+                      </div>
+                      <p className="text-base font-semibold text-foreground">
+                        {isRecording ? `Recording... ${recordingSeconds}s` : 'Ready to record'}
+                      </p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Live microphone mode converts the recording to WAV and sends it directly to the backend voice model.
+                      </p>
+
+                      <div className="mt-5 flex justify-center">
+                        {isRecording ? (
+                          <button
+                            onClick={stopRecording}
+                            className="rounded-[1.25rem] bg-secondary px-5 py-3 text-sm font-semibold text-secondary-foreground transition-colors hover:bg-secondary/90"
+                          >
+                            Stop and predict
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => void startRecording()}
+                            disabled={analyzing}
+                            className="rounded-[1.25rem] bg-primary px-5 py-3 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-60"
+                          >
+                            Start speaking
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>
                 ) : (
-                  <div className="flex flex-col gap-3 max-w-sm mx-auto pt-6">
-                    <button
-                      onClick={() => {
-                        setRecordingStatus('idle');
-                        setAudioBlob(null);
-                        setAudioUrl(null);
-                      }}
-                      className="w-full bg-[#bf9468] hover:bg-[#a67c52] text-white font-semibold p-4 rounded-xl shadow-md transition-colors"
-                    >
-                      Record Again
-                    </button>
-                    <button
-                      onClick={handleAnalyze}
-                      disabled={modelLoading || Boolean(modelError)}
-                      className="w-full bg-[#3b82f6] hover:bg-[#2563eb] text-white font-semibold p-4 rounded-xl flex items-center justify-center disabled:opacity-60 shadow-md transition-colors"
-                    >
-                      <Scan size={18} className="mr-2" />
-                      Run Voice Screening
-                    </button>
+                  <div className="rounded-[1.75rem] border border-dashed border-border bg-muted/55 p-8 text-center transition-colors hover:border-primary/40 hover:bg-muted/75">
+                    <input
+                      type="file"
+                      id="voice-upload"
+                      className="hidden"
+                      onChange={handleFileUpload}
+                      accept="audio/*"
+                      disabled={analyzing}
+                    />
+                    <label htmlFor="voice-upload" className="cursor-pointer">
+                      <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-[1.5rem] bg-primary/10 text-primary">
+                        <Upload className="h-8 w-8" />
+                      </div>
+                      {uploadFile ? (
+                        <div className="space-y-1">
+                          <p className="text-base font-semibold text-foreground">{uploadFile.name}</p>
+                          <p className="text-xs text-muted-foreground">Tap to replace the file</p>
+                        </div>
+                      ) : (
+                        <div className="space-y-1">
+                          <p className="text-base font-semibold text-foreground">Choose an audio file</p>
+                          <p className="text-xs text-muted-foreground">MP3, WAV, or M4A up to 50MB</p>
+                        </div>
+                      )}
+                    </label>
+                  </div>
+                )}
+
+                {analyzing && analysisStep && (
+                  <div className="rounded-2xl border border-primary/15 bg-primary/10 px-4 py-3">
+                    <div className="flex items-center gap-2 text-sm text-primary">
+                      <LoaderCircle className="h-4 w-4 animate-spin" />
+                      <p>{analysisStep}</p>
+                    </div>
+                  </div>
+                )}
+
+                {!isRecording && recordedBlob && mode === 'record' && !analyzing ? (
+                  <div className="rounded-2xl border border-border/70 bg-background/70 px-4 py-3 text-xs text-muted-foreground">
+                    Recorded sample ready. A new recording will replace it.
+                  </div>
+                ) : null}
+
+                {analysisError && (
+                  <div className="flex items-center gap-2 rounded-2xl border border-destructive/20 bg-destructive/10 px-4 py-3 text-destructive">
+                    <AlertCircle size={16} />
+                    <p className="text-xs font-medium">{analysisError}</p>
                   </div>
                 )}
               </div>
-            )}
-            {error && (
-              <div className="flex items-center space-x-2 text-red-400 bg-red-900/20 p-3 rounded-lg mt-4">
-                <AlertCircle size={20} />
-                <p className="text-sm">{error}</p>
+            ) : resultTone ? (
+              <div className="space-y-5">
+                <div className={`rounded-[1.75rem] border p-5 ${resultTone.accentPanel}`}>
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="flex gap-4">
+                      <div className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-[1.25rem] ${resultTone.accentIcon}`}>
+                        <Scan className="h-7 w-7" />
+                      </div>
+                      <div className="space-y-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${resultTone.accentBadge}`}>
+                            {resultTone.badge}
+                          </span>
+                          <span className="text-[11px] font-semibold uppercase tracking-[0.2em] text-muted-foreground">
+                            {predictionSource === 'record' ? 'Live speaking' : 'Uploaded audio'}
+                          </span>
+                        </div>
+                        <div>
+                          <h4 className="text-2xl font-bold text-foreground">{resultTone.title}</h4>
+                          <p className="mt-1 max-w-xl text-sm leading-relaxed text-muted-foreground">{resultTone.summary}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="rounded-[1.25rem] border border-border/70 bg-background/70 px-4 py-3 text-right">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Confidence</p>
+                      <p className={`mt-1 text-2xl font-bold ${resultTone.primaryMetric}`}>
+                        {(prediction.confidence * 100).toFixed(1)}%
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                    <div className="rounded-[1.25rem] border border-border/70 bg-background/70 p-4">
+                      <div className="mb-2 flex items-center justify-between text-sm">
+                        <span className="font-medium text-foreground">Parkinson&apos;s</span>
+                        <span className="font-semibold text-secondary">
+                          {(prediction.probabilities.Parkinsons * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                      <div className="h-2 overflow-hidden rounded-full bg-accent/70">
+                        <div
+                          className={`h-full rounded-full bg-gradient-to-r ${resultTone.riskBar}`}
+                          style={{ width: `${prediction.probabilities.Parkinsons * 100}%` }}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="rounded-[1.25rem] border border-border/70 bg-background/70 p-4">
+                      <div className="mb-2 flex items-center justify-between text-sm">
+                        <span className="font-medium text-foreground">Healthy</span>
+                        <span className="font-semibold text-primary">
+                          {(prediction.probabilities.Healthy * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                      <div className="h-2 overflow-hidden rounded-full bg-accent/70">
+                        <div
+                          className={`h-full rounded-full bg-gradient-to-r ${resultTone.healthyBar}`}
+                          style={{ width: `${prediction.probabilities.Healthy * 100}%` }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {prediction.reasoning && (
+                  <div className="rounded-[1.5rem] border border-border/70 bg-background/70 px-4 py-3">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Clinical note</p>
+                    <p className="mt-2 text-sm leading-relaxed text-foreground">{prediction.reasoning}</p>
+                  </div>
+                )}
+
+                <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                  <span className="rounded-full bg-muted px-3 py-1.5">Model: {prediction.modelInfo.name}</span>
+                  {prediction.assessment ? (
+                    <span className="rounded-full bg-muted px-3 py-1.5">
+                      Threshold: {prediction.assessment.threshold.toFixed(2)} ({prediction.assessment.sigmoidPositiveClass})
+                    </span>
+                  ) : null}
+                  {savingResult ? (
+                    <span className="inline-flex items-center gap-2 rounded-full bg-muted px-3 py-1.5">
+                      <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+                      Saving result
+                    </span>
+                  ) : null}
+                  {saveMessage ? <span className="rounded-full bg-primary/10 px-3 py-1.5 text-primary">{saveMessage}</span> : null}
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <button
+                    onClick={() => resetFlow(mode)}
+                    className="rounded-[1.25rem] border border-border bg-background/80 px-4 py-3 text-sm font-semibold text-foreground transition-colors hover:bg-muted"
+                  >
+                    Analyze another
+                  </button>
+                  <button
+                    onClick={onClose}
+                    className="rounded-[1.25rem] bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90"
+                  >
+                    Done
+                  </button>
+                </div>
               </div>
-            )}
+            ) : null}
           </div>
+        </div>
       </div>
     </div>
   );

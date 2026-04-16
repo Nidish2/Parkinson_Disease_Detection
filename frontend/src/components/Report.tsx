@@ -17,9 +17,9 @@ const getRiskTone = (risk: SessionReport['overallRisk']) => {
 };
 
 const getRiskMessage = (risk: SessionReport['overallRisk']) => {
-  if (risk === 'HIGH') return 'Some symptoms were detected. Please consult your neurologist for further evaluation.';
-  if (risk === 'MEDIUM') return 'Mild movement irregularities noted. Continue exercises and monitor progress.';
-  return 'Your movement patterns look good! Keep up the consistent exercise routine.';
+  if (risk === 'HIGH') return 'This session showed several movement issues. Please review the results with your clinician.';
+  if (risk === 'MEDIUM') return 'This session showed some movement irregularities. Continue the exercises and monitor progress.';
+  return 'This session stayed mostly within the expected range. Keep up the exercise routine.';
 };
 
 const Report = ({ report, history, onRestart }: ReportProps) => {
@@ -76,7 +76,6 @@ const Report = ({ report, history, onRestart }: ReportProps) => {
     },
   };
 
-  // Performance rating based on the scores
   const avgScore = Math.round(
     (report.movementSpeedScore + report.stabilityScore + (100 - report.tremorScore)) / 3,
   );
@@ -84,11 +83,11 @@ const Report = ({ report, history, onRestart }: ReportProps) => {
 
   return (
     <div className="space-y-6">
-      <Card className="rounded-organic-2 border-none bg-[linear-gradient(135deg,rgba(93,112,82,0.14),rgba(255,255,255,0.82))]">
+      <Card className="rounded-organic-2 border-none bg-background/80 backdrop-blur-md shadow-soft">
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
             <p className="text-sm uppercase tracking-[0.25em] text-muted-foreground">Session Report</p>
-            <h1 className="mt-2 text-3xl font-bold text-foreground">Parkinson's Movement Assessment</h1>
+            <h1 className="mt-2 text-3xl font-bold text-foreground">Therapy Session Summary</h1>
             <p className="mt-3 max-w-2xl text-sm text-muted-foreground">{report.summary}</p>
           </div>
           <div className={`rounded-full border px-4 py-2 text-sm font-semibold ${getRiskTone(report.overallRisk)}`}>
@@ -97,11 +96,10 @@ const Report = ({ report, history, onRestart }: ReportProps) => {
         </div>
       </Card>
 
-      {/* Risk feedback banner */}
       <div className={`flex items-start gap-3 rounded-[1.5rem] border px-5 py-4 text-sm ${getRiskTone(report.overallRisk)}`}>
         <Award className="mt-0.5 h-5 w-5 flex-shrink-0" />
         <div>
-          <p className="font-semibold">{performanceLabel} — Average health score: {avgScore}/100</p>
+          <p className="font-semibold">{performanceLabel} - Average health score: {avgScore}/100</p>
           <p className="mt-1 opacity-80">{getRiskMessage(report.overallRisk)}</p>
         </div>
       </div>
@@ -145,7 +143,6 @@ const Report = ({ report, history, onRestart }: ReportProps) => {
         </Card>
       </div>
 
-      {/* Advanced Metrics Card */}
       <AdvancedMetricsCard report={report} trend={report.progressionTrend} showClinicalNotes={true} />
 
       <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
@@ -162,7 +159,7 @@ const Report = ({ report, history, onRestart }: ReportProps) => {
         <Card className="rounded-organic-1">
           <h2 className="text-lg font-semibold">Session Summary</h2>
           <div className="mt-4 space-y-3 text-sm text-muted-foreground">
-            <p>Exercises completed: <span className="font-semibold text-foreground">{report.exercisesCompleted} of 4</span></p>
+            <p>Exercises completed: <span className="font-semibold text-foreground">{report.exercisesCompleted} of {report.totalExercises}</span></p>
             <p>Total reps tracked: <span className="font-semibold text-foreground">{report.totalReps}</span></p>
             <p>Amplitude score: <span className="font-semibold text-foreground">{report.amplitudeScore}</span></p>
             <p>Completed at: <span className="font-semibold text-foreground">{new Date(report.completedAt).toLocaleString()}</span></p>
@@ -170,7 +167,7 @@ const Report = ({ report, history, onRestart }: ReportProps) => {
           <div className="mt-5 space-y-2">
             <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">Recommendations</p>
             {Array.from(new Set(report.recommendations)).map((item, index) => (
-              <p key={index} className="text-sm text-muted-foreground">• {item}</p>
+              <p key={index} className="text-sm text-muted-foreground">- {item}</p>
             ))}
           </div>
           <button
@@ -185,7 +182,7 @@ const Report = ({ report, history, onRestart }: ReportProps) => {
       {report.exercisePlan.length > 0 && (
         <Card className="rounded-organic-4">
           <h2 className="text-lg font-semibold">Personalized Exercise Plan</h2>
-          <p className="mt-1 text-sm text-muted-foreground">Based on your session performance, here's your recommended exercise schedule:</p>
+          <p className="mt-1 text-sm text-muted-foreground">Based on your session performance, here is your recommended exercise schedule:</p>
           <div className="mt-4 grid gap-4 md:grid-cols-2">
             {report.exercisePlan.map((item) => (
               <div key={item.exerciseName} className="rounded-3xl bg-muted/70 p-4 text-sm text-muted-foreground">
@@ -203,22 +200,22 @@ const Report = ({ report, history, onRestart }: ReportProps) => {
           <h2 className="text-lg font-semibold">Exercise Plan</h2>
           <p className="mt-2 text-sm text-muted-foreground">
             Complete a full session with all exercises to receive a personalized exercise plan.
-            Try to complete each exercise fully by following the AI agent's guidance.
+            Try to complete each exercise fully by following the AI agent&apos;s guidance.
           </p>
           <div className="mt-4 grid gap-4 md:grid-cols-2">
-            <div className="rounded-3xl bg-muted/70 p-4 text-sm text-muted-foreground">
+            <div className="rounded-3xl bg-background/50 border border-border/40 p-4 text-sm text-muted-foreground">
               <p className="font-semibold text-foreground">Seated Hand Raise</p>
               <p className="mt-2">Practice 3-5 days per week for shoulder mobility</p>
             </div>
-            <div className="rounded-3xl bg-muted/70 p-4 text-sm text-muted-foreground">
+            <div className="rounded-3xl bg-background/50 border border-border/40 p-4 text-sm text-muted-foreground">
               <p className="font-semibold text-foreground">Finger Tapping</p>
               <p className="mt-2">Practice 3-5 days per week for hand dexterity</p>
             </div>
-            <div className="rounded-3xl bg-muted/70 p-4 text-sm text-muted-foreground">
+            <div className="rounded-3xl bg-background/50 border border-border/40 p-4 text-sm text-muted-foreground">
               <p className="font-semibold text-foreground">Arm Stability Hold</p>
               <p className="mt-2">Practice 3-5 days per week for postural control</p>
             </div>
-            <div className="rounded-3xl bg-muted/70 p-4 text-sm text-muted-foreground">
+            <div className="rounded-3xl bg-background/50 border border-border/40 p-4 text-sm text-muted-foreground">
               <p className="font-semibold text-foreground">Arm Cross Touch</p>
               <p className="mt-2">Practice 3-5 days per week for cross-body coordination</p>
             </div>

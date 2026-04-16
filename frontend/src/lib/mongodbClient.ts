@@ -1,6 +1,8 @@
 import axios from 'axios';
+import type { AppUser, UserRole } from '../types/healthcare';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+const TOKEN_KEY = 'mongodb_token';
 
 export interface MongoDBResponse<T = any> {
   data?: T;
@@ -8,15 +10,8 @@ export interface MongoDBResponse<T = any> {
   message?: string;
 }
 
-export interface User {
-  id: string;
-  email: string;
-  full_name?: string;
-  created_at: string;
-}
-
 export interface Session {
-  user: User;
+  user: AppUser;
   access_token: string;
   expires_at: number;
 }
@@ -27,10 +22,11 @@ class MongoDBClient {
 
   constructor() {
     this.baseURL = API_BASE_URL;
-    // Load token from localStorage
-    const storedToken = localStorage.getItem('mongodb_token');
+    const storedToken = sessionStorage.getItem(TOKEN_KEY) || localStorage.getItem(TOKEN_KEY);
     if (storedToken) {
       this.token = storedToken;
+      sessionStorage.setItem(TOKEN_KEY, storedToken);
+      localStorage.removeItem(TOKEN_KEY);
     }
   }
 
@@ -46,21 +42,42 @@ class MongoDBClient {
 
   setToken(token: string) {
     this.token = token;
-    localStorage.setItem('mongodb_token', token);
+    sessionStorage.setItem(TOKEN_KEY, token);
+    localStorage.removeItem(TOKEN_KEY);
   }
 
   getToken(): string | null {
-    return this.token || localStorage.getItem('mongodb_token');
+    return this.token || sessionStorage.getItem(TOKEN_KEY) || localStorage.getItem(TOKEN_KEY);
   }
 
   clearToken() {
     this.token = null;
-    localStorage.removeItem('mongodb_token');
+    sessionStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(TOKEN_KEY);
   }
 
   // Auth methods
-  async signUp(email: string, password: string, fullName?: string, gender?: string, dateOfBirth?: string, weight?: number, height?: number, clinicalStage?: string): Promise<MongoDBResponse<Session>> {
+  async signUp(
+    email: string,
+    password: string,
+    fullName?: string,
+    gender?: string,
+    dateOfBirth?: string,
+    weight?: number,
+    height?: number,
+    clinicalStage?: string,
+    role: UserRole = 'patient',
+    phone?: string,
+    hospital?: string,
+    specialties?: string[],
+    doctorIdentifier?: string,
+    age?: number,
+    doctorGender?: string,
+    qualification?: string,
+    yearsExperience?: number,
+  ): Promise<MongoDBResponse<Session>> {
     try {
+      this.clearToken();
       const response = await axios.post(`${this.baseURL}/api/auth/signup`, {
         email,
         password,
@@ -70,12 +87,24 @@ class MongoDBClient {
         weight,
         height,
         clinical_stage: clinicalStage,
+        role,
+        phone,
+        hospital,
+        specialties,
+        doctor_identifier: doctorIdentifier,
+        age,
+        doctor_gender: doctorGender,
+        qualification,
+        years_experience: yearsExperience,
       });
       if (response.data.data?.access_token) {
         this.setToken(response.data.data.access_token);
+      } else {
+        this.clearToken();
       }
       return response.data;
     } catch (error: any) {
+      this.clearToken();
       return {
         error: error.response?.data?.error || error.message || 'Sign up failed',
       };
@@ -95,6 +124,25 @@ class MongoDBClient {
     } catch (error: any) {
       return {
         error: error.response?.data?.error || error.message || 'Sign in failed',
+      };
+    }
+  }
+
+  async adminSignIn(email: string, password: string): Promise<MongoDBResponse<Session>> {
+    try {
+      this.clearToken();
+      const response = await axios.post(`${this.baseURL}/api/auth/admin-signin`, {
+        email,
+        password,
+      });
+      if (response.data.data?.access_token) {
+        this.setToken(response.data.data.access_token);
+      }
+      return response.data;
+    } catch (error: any) {
+      this.clearToken();
+      return {
+        error: error.response?.data?.error || error.message || 'Admin sign in failed',
       };
     }
   }

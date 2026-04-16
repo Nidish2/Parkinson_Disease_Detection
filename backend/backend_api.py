@@ -787,8 +787,8 @@ def preprocess_for_wave(image_bytes):
     """Preprocess image for InceptionV3 (wave)"""
     img = Image.open(io.BytesIO(image_bytes))
     img = __composite_with_white_bg(img)
-    print("  [Pre-processing] Resizing image to 224x224 (LANCZOS high quality)...")
-    img = img.resize((224, 224), Image.LANCZOS)  # High-quality downsampling
+    print("  [Pre-processing] Resizing image to 299x299 (LANCZOS high quality)...")
+    img = img.resize((299, 299), Image.LANCZOS)  # High-quality downsampling
     img_array = np.array(img, dtype=np.float32)
     # InceptionV3 preprocessing: normalize to [0, 1]
     img_array = img_array / 255.0

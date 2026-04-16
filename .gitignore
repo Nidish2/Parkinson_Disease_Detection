@@ -58,3 +58,4 @@ frontend/public/spiral/testing/**
 frontend/public/wave/testing/**
 frontend/public/
 dataset_audio/
+wave_datasets/
